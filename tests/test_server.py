@@ -55,6 +55,42 @@ def test_world_endpoints(client):
     assert all(e["min_s"] < e["max_s"] for e in adjacency)
 
 
+def test_audit_chain_records_state_changes(client, tmp_path):
+    target_id = flag(client)
+    client.post("/api/sightings", json=sighting(crop=True))
+    client.get(f"/api/targets/{target_id}")          # view_dossier
+    client.patch(f"/api/targets/{target_id}", json={"label": "renamed"})
+
+    audit = client.get("/api/audit").json()
+    assert audit["verified"] is True
+    actions = [e["action"] for e in audit["entries"]]
+    assert actions[:2] == ["flag_target", "report_sighting"]
+    assert "view_dossier" in actions and "update_target_profile" in actions
+    seqs = [e["seq"] for e in audit["entries"]]
+    assert seqs == sorted(seqs) and seqs[0] == 0    # contiguous, genesis first
+
+
+def test_audit_verify_detects_db_tamper(tmp_path):
+    from sqlmodel import Session, select
+    from server.db import AuditRow, make_engine
+    db = f"sqlite:///{tmp_path}/tamper.sqlite"
+    app = create_app(db_url=db, crops_dir=str(tmp_path / "c"))
+    with TestClient(app) as c:
+        flag(c)
+        assert c.get("/api/audit").json()["verified"] is True
+    # Tamper a persisted audit row out of band.
+    with Session(make_engine(db)) as s:
+        row = s.exec(select(AuditRow).where(AuditRow.seq == 0)).one()
+        row.action = "forged"
+        s.add(row)
+        s.commit()
+    app2 = create_app(db_url=db, crops_dir=str(tmp_path / "c"))
+    with TestClient(app2) as c2:
+        audit = c2.get("/api/audit").json()
+        assert audit["verified"] is False
+        assert audit["break_index"] == 0
+
+
 def test_flag_and_confirm_flow(client):
     target_id = flag(client)
     resp = client.post("/api/sightings", json=sighting(crop=True))

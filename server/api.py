@@ -27,6 +27,9 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from sqlmodel import Session, select
 
+from audit.store import load_entries as audit_load
+from audit.store import record as audit_record
+from audit.store import verify as audit_verify
 from perception.types import Observation, PlateRead
 from reasoning.profile import profile_from_flag
 from server import db as dbm
@@ -244,6 +247,9 @@ def create_app(
                 class_attrs=dbm.dumps(dict(profile.class_attrs)),
                 instance_attrs=dbm.dumps(dict(profile.instance_attrs)),
                 created_s=state.sim_now))
+            audit_record(session, "operator", "flag_target",
+                         {"target_id": target_id, "label": req.label,
+                          "plate": profile.plate}, state.sim_now)
             session.commit()
         return {"target_id": target_id}
 
@@ -258,14 +264,21 @@ def create_app(
             raise HTTPException(404, "unknown target")
         with Session(engine) as session:
             row = session.get(dbm.TargetRow, target_id)
-            updates = session.exec(
+            reference_crop = row.reference_crop if row else ""
+            updates = [u.model_dump() for u in session.exec(
                 select(dbm.ProfileUpdateRow)
                 .where(dbm.ProfileUpdateRow.target_id == target_id)
-                .order_by(dbm.ProfileUpdateRow.version)).all()
-            chain = session.exec(
+                .order_by(dbm.ProfileUpdateRow.version)).all()]
+            chain = [c.model_dump() for c in session.exec(
                 select(dbm.CorroborationRow)
                 .where(dbm.CorroborationRow.target_id == target_id)
-                .order_by(dbm.CorroborationRow.timestamp_s)).all()
+                .order_by(dbm.CorroborationRow.timestamp_s)).all()]
+            # Opening a target's full dossier is a data access worth logging;
+            # per-thumbnail crop fetches are not (they are UI rendering).
+            # Serialize the rows to dicts *before* this commit expires them.
+            audit_record(session, "operator", "view_dossier",
+                         {"target_id": target_id}, state.sim_now)
+            session.commit()
         snap = state.tracker.snapshot(state.sim_now).get(target_id, {})
         return {
             "target_id": target_id,
@@ -274,10 +287,10 @@ def create_app(
             "class_attrs": dict(tracked.profile.class_attrs),
             "instance_attrs": dict(tracked.profile.instance_attrs),
             "gallery_size": len(tracked.profile.gallery),
-            "reference_crop": (row.reference_crop if row else ""),
+            "reference_crop": reference_crop,
             "live": snap,
-            "profile_updates": [u.model_dump() for u in updates],
-            "corroboration_chain": [c.model_dump() for c in chain],
+            "profile_updates": updates,
+            "corroboration_chain": chain,
         }
 
     @app.patch("/api/targets/{target_id}")
@@ -310,12 +323,20 @@ def create_app(
                 row.label = profile.label
                 row.class_attrs = dbm.dumps(dict(profile.class_attrs))
                 session.add(row)
+            audit_record(session, "operator", "update_target_profile",
+                         {"target_id": target_id, "fields": sorted(changes),
+                          "version": profile.version}, state.sim_now)
             session.commit()
         return {"target_id": target_id, "version": profile.version}
 
     @app.delete("/api/targets/{target_id}", status_code=204)
     def unflag_target(target_id: str):
         state.tracker.unflag_target(target_id)
+        # Previously wrote nothing — an untraceable deletion. Now audited.
+        with Session(engine) as session:
+            audit_record(session, "operator", "unflag_target",
+                         {"target_id": target_id}, state.sim_now)
+            session.commit()
 
     # ---------------------------------------------------------- sightings
 
@@ -348,6 +369,9 @@ def create_app(
             _persist_events(session, events, obs)
             _fuse_3d_for_events(events, session)
             _sync_target_rows(session)
+            audit_record(session, f"camera:{obs.camera_id}", "report_sighting",
+                         {"event_id": obs.event_id, "camera_id": obs.camera_id,
+                          "outcomes": [e.kind for e in events]}, obs.timestamp_s)
             session.commit()
         await state.manager.broadcast({
             "type": "contact", "event_id": obs.event_id,
@@ -400,12 +424,33 @@ def create_app(
             _persist_events(session, events, None)
             _fuse_3d_for_events(events, session)
             _sync_target_rows(session)
+            audit_record(session, "operator", "resolve_review",
+                         {"review_id": review_id, "accepted": res.accept},
+                         state.sim_now)
             session.commit()
         await _broadcast_events(events)
         await state.manager.broadcast({
             "type": "snapshot", "timestamp_s": state.sim_now,
             "targets": state.tracker.snapshot(state.sim_now)})
         return {"resolved": review_id, "accepted": res.accept}
+
+    @app.get("/api/audit")
+    def get_audit(limit: int = 100):
+        """Recent audit entries + a live chain-integrity verdict."""
+        with Session(engine) as session:
+            entries = audit_load(session, limit=limit)
+            result = audit_verify(session)
+        return {
+            "verified": result.ok,
+            "length": result.length,
+            "break_index": result.break_index,
+            "reason": result.reason,
+            "entries": [
+                {"seq": e.seq, "timestamp_s": e.timestamp_s, "actor": e.actor,
+                 "action": e.action, "payload_digest": e.payload_digest[:12],
+                 "entry_hash": e.entry_hash[:12]}
+                for e in entries],
+        }
 
     @app.get("/api/alerts")
     def get_alerts(since_s: float = 0.0, target_id: str = "", limit: int = 200):
@@ -462,6 +507,13 @@ def create_app(
         path = (base / name).resolve()
         if base not in path.parents or not path.is_file():
             raise HTTPException(404, "no such model file")
+        # A model export (.splat/.ply) leaves the system — audit it. Turntable
+        # PNGs are UI and not logged.
+        if name.endswith((".splat", ".ply")):
+            with Session(engine) as session:
+                audit_record(session, "operator", "export_model3d",
+                             {"target_id": target_id, "file": name}, state.sim_now)
+                session.commit()
         media = "image/png" if name.endswith(".png") else "application/octet-stream"
         return FileResponse(path, media_type=media)
 
