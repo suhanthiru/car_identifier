@@ -191,6 +191,25 @@ async function resolveReview(reviewId, accept) {
   refreshReviews();
 }
 
+async function refreshAudit() {
+  let audit;
+  try { audit = await api("/api/audit?limit=8"); } catch (e) { return; }
+  const badge = document.getElementById("audit-badge");
+  badge.textContent = audit.verified ? `intact · ${audit.length}` : "TAMPERED";
+  badge.style.background = audit.verified ? "var(--confirmed)" : "var(--veto)";
+  const el = document.getElementById("audit");
+  const rows = audit.entries.slice().reverse();
+  el.innerHTML = rows.length ? "" : `<div class="alert-row">no entries yet</div>`;
+  rows.forEach((e) => {
+    const row = document.createElement("div");
+    row.className = "alert-row";
+    row.innerHTML = `<b>#${e.seq}</b> ${escapeHtml(e.action)}
+      <span style="color:var(--dim)">${escapeHtml(e.actor)}</span>
+      <span style="float:right;font-family:Consolas,monospace">${escapeHtml(e.entry_hash)}</span>`;
+    el.appendChild(row);
+  });
+}
+
 function pushAlert(msg) {
   const el = document.getElementById("alerts");
   const row = document.createElement("div");
@@ -300,6 +319,7 @@ function connect() {
       if (["review", "anomaly", "association", "rejection"].includes(msg.type)) {
         refreshReviews();
       }
+      refreshAudit();
     }
   };
   ws.onclose = () => setTimeout(connect, 1500);
@@ -308,5 +328,7 @@ function connect() {
 initMap().then(() => {
   connect();
   refreshReviews();
+  refreshAudit();
   setInterval(refreshReviews, 5000);
+  setInterval(refreshAudit, 5000);
 });
