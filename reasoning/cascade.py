@@ -28,13 +28,14 @@ from typing import Any, Callable, Sequence
 
 from perception.embedder import max_similarity
 from perception.types import Observation
-from reasoning.facts import Fact, info, support
+from reasoning.distinctiveness import distinctiveness
+from reasoning.facts import Fact, caution, info, support
 from reasoning.plausibility import run_all_checks
 from reasoning.profile import TargetProfile
 from reasoning.signals import MatchSignals, compute_signals
 from reasoning.weights import (
-    CONFIRM_THRESHOLD, LIKELY_THRESHOLD, W_CLASS_ATTRS, W_GEOMETRY,
-    W_INSTANCE_ATTR, W_PLATE_EXACT, W_PLATE_NEAR, W_REID_MAX,
+    CONFIRM_THRESHOLD, DISTINCTIVENESS_FLOOR, LIKELY_THRESHOLD, W_CLASS_ATTRS,
+    W_GEOMETRY, W_INSTANCE_ATTR, W_PLATE_EXACT, W_PLATE_NEAR, W_REID_MAX,
 )
 from sim.road_graph import RoadGraph
 
@@ -88,12 +89,16 @@ class ScoredDecision:
     deciding_tier: str
     anomaly: bool
     requires_review: bool
+    distinctiveness: float = 1.0
+    refused_to_individuate: bool = False
 
 
 @dataclass(frozen=True)
 class CascadeConfig:
     reid_prob_fn: Callable[[float], float] = _uncalibrated_reid_prob
     reid_calibration_label: str = "uncalibrated-linear"
+    # Feature B: below this distinctiveness, refuse to name an individual.
+    distinctiveness_floor: float = DISTINCTIVENESS_FLOOR
 
 
 def score_from_signals(signals: MatchSignals, config: CascadeConfig | None = None) -> ScoredDecision:
@@ -131,15 +136,28 @@ def score_from_signals(signals: MatchSignals, config: CascadeConfig | None = Non
             tier = "reid"
     score = min(1.0, score)
 
+    dist = distinctiveness(signals)
+    floor = (config or CascadeConfig()).distinctiveness_floor
+
     if vetoed:
         anomaly = signals.plate_exact  # plate says yes, physics/logic says no
-        return ScoredDecision(VERDICT_REJECTED, 0.0, tier, anomaly, requires_review=anomaly)
+        return ScoredDecision(VERDICT_REJECTED, 0.0, tier, anomaly,
+                              requires_review=anomaly, distinctiveness=dist)
     if signals.plate_exact and score >= CONFIRM_THRESHOLD:
-        return ScoredDecision(VERDICT_CONFIRMED, score, tier, False, False)
+        # Plate distinctiveness is 1.0, so CONFIRMED is never refused below.
+        return ScoredDecision(VERDICT_CONFIRMED, score, tier, False, False,
+                              distinctiveness=dist)
     if score >= LIKELY_THRESHOLD:
+        if dist < floor:
+            # Evidence is real but too generic to name one vehicle: refuse to
+            # individuate, return a candidate set, and auto-fire nothing.
+            return ScoredDecision(VERDICT_CANDIDATE, score, tier, False, True,
+                                  distinctiveness=dist, refused_to_individuate=True)
         # Appearance/attribute evidence alone never auto-confirms.
-        return ScoredDecision(VERDICT_LIKELY, score, tier, False, True)
-    return ScoredDecision(VERDICT_UNDECIDED, score, tier, False, False)
+        return ScoredDecision(VERDICT_LIKELY, score, tier, False, True,
+                              distinctiveness=dist)
+    return ScoredDecision(VERDICT_UNDECIDED, score, tier, False, False,
+                          distinctiveness=dist)
 
 
 def evaluate(
@@ -169,13 +187,20 @@ def evaluate(
         facts.append(support(
             "Anomaly: plate matches but a hard veto fired — possible plate "
             "clone or camera clock skew. Flagged for review.", "plate"))
+    if scored.refused_to_individuate:
+        facts.append(caution(
+            f"Refused to individuate: distinctiveness {scored.distinctiveness:.2f} "
+            f"is below the floor {cfg.distinctiveness_floor:.2f} — the evidence is "
+            f"class-level and cannot name one vehicle. Returning a candidate set "
+            f"for human review; nothing auto-fires.", "distinctiveness"))
 
     return MatchDecision(
         target_id=profile.target_id, event_id=obs.event_id,
         verdict=scored.verdict, score=scored.score, deciding_tier=scored.deciding_tier,
         facts=tuple(facts), reid_similarity=reid_sim,
         requires_review=scored.requires_review, anomaly=scored.anomaly,
-        signals=signals,
+        signals=signals, distinctiveness=scored.distinctiveness,
+        refused_to_individuate=scored.refused_to_individuate,
     )
 
 
@@ -201,9 +226,19 @@ def rank_candidates(
     """
     if not profiles:
         return None
+    from dataclasses import replace
+
     decisions = sorted(
         (evaluate(obs, p, graph, config) for p in profiles),
         key=lambda d: d.score, reverse=True,
     )
-    margin = (decisions[0].score - decisions[1].score) if len(decisions) > 1 else decisions[0].score
-    return RankedMatch(best=decisions[0], margin=margin, all_decisions=tuple(decisions))
+    best = decisions[0]
+    margin = (best.score - decisions[1].score) if len(decisions) > 1 else best.score
+    if best.refused_to_individuate:
+        # The candidate set: every target with real, non-vetoed support. The
+        # system narrows to these and names none.
+        candidates = tuple(
+            d.target_id for d in decisions
+            if d.score >= LIKELY_THRESHOLD and d.verdict != VERDICT_REJECTED)
+        best = replace(best, candidate_ids=candidates)
+    return RankedMatch(best=best, margin=margin, all_decisions=tuple(decisions))

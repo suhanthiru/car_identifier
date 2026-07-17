@@ -3,8 +3,8 @@ import numpy as np
 import pytest
 
 from reasoning.cascade import (
-    VERDICT_CONFIRMED, VERDICT_LIKELY, VERDICT_REJECTED, VERDICT_UNDECIDED,
-    evaluate, rank_candidates,
+    VERDICT_CANDIDATE, VERDICT_CONFIRMED, VERDICT_LIKELY, VERDICT_REJECTED,
+    VERDICT_UNDECIDED, evaluate, rank_candidates,
 )
 from reasoning.profile import LastSeen
 from sim.road_graph import default_world
@@ -25,12 +25,27 @@ def test_clean_plate_match_confirms(graph):
     assert any("exactly matches" in f.text for f in d.facts)
 
 
-def test_attributes_plus_marks_is_likely_and_reviewed(graph):
+def test_single_common_mark_is_refused_not_individuated(graph):
+    """One distinguishing mark + class attributes is not enough to name one
+    vehicle (feature B): distinctiveness sits below the floor, so the system
+    refuses to individuate and returns a candidate set."""
     obs = make_obs(instance_attrs={"accessory": "roof rack"})
     profile = make_profile(plate="", instance_attrs={"accessory": "roof rack"})
     d = evaluate(obs, profile, graph)
+    assert d.verdict == VERDICT_CANDIDATE
+    assert d.refused_to_individuate and d.requires_review
+    assert d.distinctiveness < 0.30
+
+
+def test_two_marks_individuate(graph):
+    """Two distinguishing marks push distinctiveness over the floor: the
+    system may now name an individual (LIKELY, still human-reviewed)."""
+    marks = {"accessory": "roof rack", "sticker": "oval bumper sticker"}
+    d = evaluate(make_obs(instance_attrs=dict(marks)),
+                 make_profile(plate="", instance_attrs=dict(marks)), graph)
     assert d.verdict == VERDICT_LIKELY
-    assert d.requires_review, "appearance/attribute evidence must go to a human"
+    assert not d.refused_to_individuate
+    assert d.distinctiveness >= 0.30
 
 
 def test_reid_cannot_rescue_zero_symbolic_evidence(graph):
