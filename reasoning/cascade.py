@@ -44,6 +44,9 @@ W_PLATE_EXACT = 0.90
 W_PLATE_NEAR = 0.35
 W_CLASS_ATTRS = 0.20
 W_INSTANCE_ATTR = 0.25
+# 3D-geometry consistency (car3d bridge): attribute-tier evidence, small on
+# purpose — view-invariant but coarse; it narrows, it does not identify.
+W_GEOMETRY = 0.10
 W_REID_MAX = 0.30        # ReID can contribute at most this much
 LIKELY_THRESHOLD = 0.45
 CONFIRM_THRESHOLD = 0.85
@@ -120,6 +123,12 @@ def evaluate(
     if mark_matches:
         score += W_INSTANCE_ATTR * mark_matches
         if tier in ("none", "attributes"):
+            tier = "attributes"
+    geometry_support = any(f.check == "geometry" and f.kind == KIND_SUPPORT
+                           for f in facts)
+    if geometry_support:
+        score += W_GEOMETRY
+        if tier == "none":
             tier = "attributes"
     if profile.gallery and score > 0 and not vetoed:
         # ReID only refines an already-supported candidate — never rescues

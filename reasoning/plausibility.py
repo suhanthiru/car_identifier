@@ -114,6 +114,8 @@ def check_attributes(obs: Observation, profile: TargetProfile) -> list[Fact]:
             f"(classifier/camera noise is possible).", "attributes"))
 
     for kind, val in profile.instance_attrs.items():
+        if kind.startswith(GEOM_PREFIX):
+            continue  # 3D geometry has its own soft check; never a mark veto
         seen = obs.instance_attrs.get(kind)
         if seen is None:
             facts.append(info(
@@ -127,9 +129,44 @@ def check_attributes(obs: Observation, profile: TargetProfile) -> list[Fact]:
                 f"Distinguishing-mark contradiction: target has '{val}', "
                 f"sighting shows '{seen}'.", "attributes"))
     for kind, seen in obs.instance_attrs.items():
-        if kind not in profile.instance_attrs:
+        if kind not in profile.instance_attrs and not kind.startswith(GEOM_PREFIX):
             facts.append(info(
                 f"Sighting shows a mark not yet on the profile: {seen}.", "attributes"))
+    return facts
+
+
+GEOM_PREFIX = "geom3d:"
+
+
+def check_geometry(obs: Observation, profile: TargetProfile) -> list[Fact]:
+    """3D-geometry attribute comparison (from the car3d bridge).
+
+    View-invariant proportion buckets measured on fused splat clouds. They
+    enter at the attribute tier as support/caution only — sparse single-crop
+    reconstructions mismeasure too often for geometry to carry veto power,
+    and it must never act as the ReID tiebreaker. Runs only when BOTH sides
+    actually carry geometry (the bridge withholds attrs until enough of the
+    cloud is real evidence, so absence is common and meaningless).
+    """
+    obs_geom = {k: v for k, v in obs.instance_attrs.items() if k.startswith(GEOM_PREFIX)}
+    prof_geom = {k: v for k, v in profile.instance_attrs.items()
+                 if k.startswith(GEOM_PREFIX)}
+    shared = sorted(set(obs_geom) & set(prof_geom))
+    if not shared:
+        return []
+    matches = [k for k in shared if obs_geom[k] == prof_geom[k]]
+    facts: list[Fact] = []
+    if matches:
+        facts.append(support(
+            "3D geometry consistent: " +
+            ", ".join(f"{k.removeprefix(GEOM_PREFIX)}={obs_geom[k]}" for k in matches) +
+            " (view-invariant).", "geometry"))
+    for k in shared:
+        if obs_geom[k] != prof_geom[k]:
+            facts.append(caution(
+                f"3D geometry mismatch on {k.removeprefix(GEOM_PREFIX)}: target "
+                f"{prof_geom[k]}, sighting {obs_geom[k]} — sparse reconstructions "
+                f"mismeasure, so this cautions rather than vetoes.", "geometry"))
     return facts
 
 
@@ -156,10 +193,12 @@ def check_corroboration(obs: Observation, profile: TargetProfile, graph: RoadGra
 def run_all_checks(
     obs: Observation, profile: TargetProfile, graph: RoadGraph
 ) -> list[Fact]:
-    """All four checks, in the order the console displays them."""
+    """All checks, in the order the console displays them. Geometry is a
+    no-op unless both sides carry 3D attributes from the car3d bridge."""
     return [
         *check_plate(obs, profile),
         *check_transit(obs, profile, graph),
         *check_attributes(obs, profile),
+        *check_geometry(obs, profile),
         *check_corroboration(obs, profile, graph),
     ]
