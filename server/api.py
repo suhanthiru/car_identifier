@@ -45,7 +45,17 @@ def create_app(
     db_url: str = dbm.DEFAULT_DB_URL,
     crops_dir: str = "data/crops",
     calibration_path: str = "calibration/artifacts/latest.json",
+    enable_3d: bool | None = None,
+    targets3d_dir: str = "data/targets3d",
 ) -> FastAPI:
+    """enable_3d: build/maintain a cargen 3D model per target, fusing crops
+    only on gated (plate/operator-confirmed) updates. Off by default: the
+    CPU reconstruction adds seconds per confirmed sighting. Env override:
+    EYES_ENABLE_3D=1."""
+    import os
+
+    if enable_3d is None:
+        enable_3d = os.environ.get("EYES_ENABLE_3D", "0") == "1"
     graph = graph or default_world()
     cascade_config = None
     if calibration_path and Path(calibration_path).is_file():
@@ -76,6 +86,77 @@ def create_app(
     state.crops_dir = Path(crops_dir)
     state.sim_now = 0.0
     state.target_seq = itertools.count(1)
+    state.enable_3d = enable_3d
+    state.targets3d_dir = Path(targets3d_dir)
+
+    # Rehydrate flagged targets from a pre-existing DB so a server restart
+    # neither collides on target ids nor forgets what was flagged. Live
+    # track state (belief, lifecycle, gallery) is in-memory and resets —
+    # the audit tables keep the history, the track re-earns confirmation.
+    max_seq = 0
+    with Session(engine) as session:
+        for row in session.exec(select(dbm.TargetRow)).all():
+            profile = profile_from_flag(
+                row.target_id, row.label, row.plate,
+                dbm.loads(row.class_attrs) or {},
+                dbm.loads(row.instance_attrs) or {})
+            try:
+                state.tracker.flag_target(profile)
+            except ValueError:
+                pass
+            suffix = row.target_id.rsplit("-", 1)[-1]
+            if suffix.isdigit():
+                max_seq = max(max_seq, int(suffix))
+    state.target_seq = itertools.count(max_seq + 1)
+
+    # ------------------------------------------------------------ 3d bridge
+
+    def _fuse_3d_for_events(events, session: Session) -> None:
+        """Fuse gated (confirmed) sightings into per-target cargen models.
+
+        Runs only on profile_update events — the exact moments the profile
+        gate opened — so cargen's pending-approval merge policy and this
+        project's update gate stay one mechanism. Failures degrade to a
+        console note; 3D is corroborative, never load-bearing.
+        """
+        if not state.enable_3d:
+            return
+        import cv2
+
+        from car3d.geometry import signature_to_attrs
+        from car3d.profile_model import Target3DModel
+
+        for ev in [e for e in events if e.kind == "profile_update" and e.event_id]:
+            crop_path = state.crops_dir / f"{ev.event_id}.png"
+            crop = cv2.imread(str(crop_path)) if crop_path.exists() else None
+            if crop is None:
+                continue
+            try:
+                model = Target3DModel(ev.target_id, state.targets3d_dir)
+                outcome = model.fuse_confirmed_crop(
+                    crop, ev.event_id,
+                    reason=str(ev.detail.get("reason", "gated update")),
+                    timestamp=ev.timestamp_s)
+                model.turntable_png(provenance_overlay=True)
+            except Exception as exc:  # noqa: BLE001 — 3D must never sink ingest
+                print(f"car3d: fusion failed for {ev.target_id}: {exc}")
+                continue
+            geom_attrs = signature_to_attrs(outcome.geometry)
+            if geom_attrs:
+                tracked = state.tracker.targets().get(ev.target_id)
+                if tracked is not None:
+                    profile = dataclasses.replace(
+                        tracked.profile,
+                        instance_attrs={**tracked.profile.instance_attrs,
+                                        **geom_attrs},
+                        version=tracked.profile.version + 1)
+                    state.tracker.replace_profile(ev.target_id, profile)
+                    session.add(dbm.ProfileUpdateRow(
+                        target_id=ev.target_id, event_id=ev.event_id,
+                        version=profile.version,
+                        reason="3D geometry attributes refreshed from the "
+                               "fused model (gated fusion, reversible).",
+                        timestamp_s=ev.timestamp_s))
 
     # ------------------------------------------------------------ helpers
 
@@ -265,6 +346,7 @@ def create_app(
                 detection_source=obs.detection_source,
                 crop_path=crop_name, truth_id=obs.eval_truth_id))
             _persist_events(session, events, obs)
+            _fuse_3d_for_events(events, session)
             _sync_target_rows(session)
             session.commit()
         await state.manager.broadcast({
@@ -316,6 +398,7 @@ def create_app(
                 row.resolved_s = state.sim_now
                 session.add(row)
             _persist_events(session, events, None)
+            _fuse_3d_for_events(events, session)
             _sync_target_rows(session)
             session.commit()
         await _broadcast_events(events)
@@ -343,6 +426,44 @@ def create_app(
     @app.get("/api/adjacency")
     def camera_adjacency():
         return [dataclasses.asdict(e) for e in graph.edges]
+
+    @app.get("/api/targets/{target_id}/model3d")
+    def target_model3d(target_id: str):
+        """3D-model status for the dossier. exists=false when 3D is disabled
+        or nothing has been fused yet — the UI hides the section then."""
+        from car3d.profile_model import Target3DModel
+
+        model = Target3DModel(target_id, state.targets3d_dir)
+        if not model.exists():
+            return {"exists": False, "enabled": state.enable_3d}
+        asset = model.load()
+        sig = model.geometry()
+        return {
+            "exists": True, "enabled": state.enable_3d,
+            "observations": len(asset.observations),
+            "n_splats": asset.cloud.n,
+            "observed_fraction": sig.observed_fraction if sig else 0.0,
+            "geometry": ({"body_profile": sig.body_profile,
+                          "length_class": sig.length_class,
+                          "lw_ratio": sig.lw_ratio, "hl_ratio": sig.hl_ratio,
+                          "trustworthy": sig.trustworthy} if sig else None),
+            "turntable": f"/api/targets/{target_id}/model3d/turntable_provenance.png",
+            "exports": {
+                "splat": f"/api/targets/{target_id}/model3d/model.splat",
+                "ply": f"/api/targets/{target_id}/model3d/model.ply",
+                "provenance_ply":
+                    f"/api/targets/{target_id}/model3d/model_provenance.ply",
+            },
+        }
+
+    @app.get("/api/targets/{target_id}/model3d/{name}")
+    def target_model3d_file(target_id: str, name: str):
+        base = (state.targets3d_dir / target_id / "exports").resolve()
+        path = (base / name).resolve()
+        if base not in path.parents or not path.is_file():
+            raise HTTPException(404, "no such model file")
+        media = "image/png" if name.endswith(".png") else "application/octet-stream"
+        return FileResponse(path, media_type=media)
 
     @app.get("/api/crops/{name}")
     def get_crop(name: str):
