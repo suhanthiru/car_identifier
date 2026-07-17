@@ -250,6 +250,41 @@ def cityflow_section() -> str:
     return "\n".join(lines)
 
 
+def threed_section() -> str:
+    """The 3D-geometry ablation is doubly gated and says so."""
+    try:
+        from cargen import backends
+        backends.build_prior_generator()
+        backend_ok = True
+    except Exception:
+        backend_ok = False
+    from datasets.veri776 import Veri776
+
+    if Veri776.exists() and backend_ok:
+        return ""  # the veri section's ablation would then include the 3D row
+    missing = []
+    if not Veri776.exists():
+        missing.append("VeRi-776 (manual request, see DATASETS.md)")
+    if not backend_ok:
+        missing.append("a real cargen image-to-3D backend (SF3D/TRELLIS — the "
+                       "stub prior emits a procedural sedan whose geometry is "
+                       "meaningless for identification)")
+    return "\n".join([
+        "## 3D-geometry ablation (car3d bridge)",
+        "",
+        "**PENDING — requires " + " and ".join(missing) + ".**",
+        "",
+        "Planned, code in place (`eval/ablation.py` `extra_attrs` hook + "
+        "`car3d/geometry.py`): (a) cascade precision with vs without "
+        "3D-derived proportion attributes on cross-VIEW query/gallery pairs, "
+        "where 2D ReID degrades most; (b) geometry error vs number of fused "
+        "sightings, to substantiate — or refute — the claim that the model "
+        "firms up with corroboration. Both will be reported even if the gain "
+        "is small or absent.",
+        "",
+    ])
+
+
 # ---------------------------------------------------------- synthetic block
 
 def synthetic_section() -> str:
@@ -298,6 +333,7 @@ def main() -> None:
         veri_section(args.quick),
         vehicleid_section(args.quick),
         cityflow_section(),
+        threed_section(),
         synthetic_section(),
     ]
     RESULTS_PATH.write_text("\n".join(parts), encoding="utf-8")
