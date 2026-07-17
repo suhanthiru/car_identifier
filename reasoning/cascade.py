@@ -93,12 +93,23 @@ class ScoredDecision:
     refused_to_individuate: bool = False
 
 
+# Feature D: render-and-compare runs only when the shortlist's top two
+# appearance-grade candidates are within this score margin (a look-alike tie).
+RENDER_TIEBREAK_MARGIN = 0.10
+
+
 @dataclass(frozen=True)
 class CascadeConfig:
     reid_prob_fn: Callable[[float], float] = _uncalibrated_reid_prob
     reid_calibration_label: str = "uncalibrated-linear"
     # Feature B: below this distinctiveness, refuse to name an individual.
     distinctiveness_floor: float = DISTINCTIVENESS_FLOOR
+    # Feature D: (target_id, observation) -> calibrated P(same) | None (abstain).
+    # Dependency inversion: the server wires a car3d.match-backed closure so
+    # reasoning/ never imports car3d. Consulted ONLY to reorder an already-
+    # narrowed appearance-grade tie; contributes 0 to any score, overrides
+    # nothing. None (abstain) leaves ordering untouched.
+    shortlist_verifier: Callable[[str, Observation], float | None] | None = None
 
 
 def score_from_signals(signals: MatchSignals, config: CascadeConfig | None = None) -> ScoredDecision:
@@ -209,6 +220,38 @@ def evaluate(
     )
 
 
+def _apply_shortlist_verifier(
+    decisions: list[MatchDecision], obs: Observation, cfg: CascadeConfig
+) -> list[MatchDecision]:
+    """Reorder the top-two tied candidates by render-and-compare P(same).
+
+    Never changes a verdict or score — only attaches render_match_p to the
+    signals, appends an explanatory fact, and reorders the tie. Abstentions
+    (None) leave a candidate untouched.
+    """
+    from dataclasses import replace
+
+    annotated: list[MatchDecision] = []
+    for d in decisions[:2]:
+        p = cfg.shortlist_verifier(d.target_id, obs)
+        if p is None:
+            annotated.append(d)
+            continue
+        sig = (d.signals or MatchSignals()).with_render(p, "rendercmp")
+        fact = info(
+            f"Render-and-compare verification: P(same)={p:.2f} [rendercmp]. "
+            f"Tiebreaker on a look-alike shortlist only — does not change the "
+            f"score or override plate/attribute evidence.", "render")
+        annotated.append(replace(d, signals=sig, facts=d.facts + (fact,)))
+
+    def key(d: MatchDecision) -> float:
+        rp = d.signals.render_match_p if d.signals else None
+        return rp if rp is not None else -1.0
+
+    annotated.sort(key=key, reverse=True)
+    return annotated + decisions[2:]
+
+
 @dataclass(frozen=True)
 class RankedMatch:
     best: MatchDecision
@@ -233,10 +276,21 @@ def rank_candidates(
         return None
     from dataclasses import replace
 
+    cfg = config or CascadeConfig()
     decisions = sorted(
         (evaluate(obs, p, graph, config) for p in profiles),
         key=lambda d: d.score, reverse=True,
     )
+
+    # Feature D: render-and-compare verification tiebreaker. Runs only on an
+    # appearance-grade tie between the top two, reorders them by the
+    # separately-calibrated P(same), and annotates — it changes no verdict and
+    # no score. Verdicts decided by plate/attributes never reach this branch.
+    if (cfg.shortlist_verifier is not None and len(decisions) >= 2
+            and decisions[0].verdict in (VERDICT_LIKELY, VERDICT_CANDIDATE)
+            and (decisions[0].score - decisions[1].score) < RENDER_TIEBREAK_MARGIN):
+        decisions = _apply_shortlist_verifier(decisions, obs, cfg)
+
     best = decisions[0]
     margin = (best.score - decisions[1].score) if len(decisions) > 1 else best.score
     if best.refused_to_individuate:

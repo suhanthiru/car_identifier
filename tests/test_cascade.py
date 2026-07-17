@@ -107,6 +107,52 @@ def test_reid_breaks_tie_between_lookalikes(graph):
     assert len(ranked.all_decisions) == 2
 
 
+def test_shortlist_verifier_reorders_tie_without_changing_scores(graph):
+    """Render-and-compare tiebreaker: reorders a look-alike tie by P(same)
+    but changes no verdict and no score (non-domination)."""
+    from reasoning.cascade import CascadeConfig
+    marks = {"accessory": "roof rack", "sticker": "oval bumper sticker"}
+    e = unit_vec(3)
+    a = make_profile(target_id="tgt-a", plate="", gallery=(e,), instance_attrs=dict(marks))
+    b = make_profile(target_id="tgt-b", plate="", gallery=(e,), instance_attrs=dict(marks))
+    obs = make_obs(embedding=e, instance_attrs=dict(marks))
+
+    base = rank_candidates(obs, [a, b], graph)
+    baseline = {d.target_id: (d.verdict, round(d.score, 6)) for d in base.all_decisions}
+
+    # Verifier favors tgt-b; both were within the tiebreak margin.
+    cfg = CascadeConfig(shortlist_verifier=lambda tid, o: {"tgt-a": 0.2, "tgt-b": 0.95}[tid])
+    ranked = rank_candidates(obs, [a, b], graph, cfg)
+    after = {d.target_id: (d.verdict, round(d.score, 6)) for d in ranked.all_decisions}
+
+    assert baseline == after, "verifier must not change any verdict or score"
+    assert ranked.best.target_id == "tgt-b", "tiebreaker reorders to the verified match"
+    assert ranked.best.signals.render_match_p == 0.95
+    assert any(f.check == "render" for f in ranked.best.facts)
+
+
+def test_shortlist_verifier_not_called_on_plate_match(graph):
+    from reasoning.cascade import CascadeConfig
+    calls = []
+    cfg = CascadeConfig(shortlist_verifier=lambda tid, o: (calls.append(tid), 0.9)[1])
+    d = rank_candidates(make_obs(plate="ABC-1234"), [make_profile()], graph, cfg)
+    assert d.best.verdict == VERDICT_CONFIRMED
+    assert not calls, "plate-decided matches never invoke the render tiebreaker"
+
+
+def test_shortlist_verifier_abstain_leaves_order(graph):
+    from reasoning.cascade import CascadeConfig
+    marks = {"accessory": "roof rack", "sticker": "oval bumper sticker"}
+    e = unit_vec(3)
+    a = make_profile(target_id="tgt-a", plate="", gallery=(e,), instance_attrs=dict(marks))
+    b = make_profile(target_id="tgt-b", plate="", gallery=(e,), instance_attrs=dict(marks))
+    obs = make_obs(embedding=e, instance_attrs=dict(marks))
+    base = rank_candidates(obs, [a, b], graph)
+    cfg = CascadeConfig(shortlist_verifier=lambda tid, o: None)  # always abstain
+    ranked = rank_candidates(obs, [a, b], graph, cfg)
+    assert ranked.best.target_id == base.best.target_id
+
+
 def test_rank_candidates_empty():
     assert rank_candidates(make_obs(), [], default_world()) is None
 
