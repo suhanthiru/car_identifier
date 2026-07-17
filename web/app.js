@@ -208,11 +208,15 @@ function pushAlert(msg) {
 
 async function openDossier(targetId) {
   const d = await api(`/api/targets/${targetId}`);
+  let model3d = { exists: false };
+  try { model3d = await api(`/api/targets/${targetId}/model3d`); } catch (e) { /* optional */ }
   const live = d.live || {};
   const attrs = Object.entries(d.class_attrs).map(([k, v]) =>
     `<tr><td>${escapeHtml(k)}</td><td>${escapeHtml(v)}</td></tr>`).join("");
-  const marks = Object.entries(d.instance_attrs).map(([k, v]) =>
-    `<tr><td>${escapeHtml(k)}</td><td>${escapeHtml(v)}</td></tr>`).join("");
+  const marks = Object.entries(d.instance_attrs)
+    .filter(([k]) => !k.startsWith("geom3d:"))  // shown in the 3D section
+    .map(([k, v]) =>
+      `<tr><td>${escapeHtml(k)}</td><td>${escapeHtml(v)}</td></tr>`).join("");
   const updates = d.profile_updates.map((u) =>
     `<tr><td>v${u.version}</td><td>${fmtTime(u.timestamp_s)}</td>
      <td>${escapeHtml(u.reason)}</td></tr>`).join("");
@@ -229,6 +233,22 @@ async function openDossier(targetId) {
       "<tr><td colspan=2>none recorded</td></tr>"}</table>
     <table><tr><th colspan="2">Distinguishing marks (sim-labeled)</th></tr>${marks ||
       "<tr><td colspan=2>none recorded</td></tr>"}</table>
+    ${model3d.exists ? `
+    <h4 style="margin-top:12px">3D model (fused from confirmed sightings only)</h4>
+    <div class="sub">${model3d.observations} fused observation(s) ·
+      ${model3d.n_splats} splats ·
+      ${Math.round(model3d.observed_fraction * 100)}% confirmed by real sightings
+      ${model3d.geometry && model3d.geometry.trustworthy
+        ? ` · profile ${escapeHtml(model3d.geometry.body_profile)},
+            ${escapeHtml(model3d.geometry.length_class)}
+            (L/W ${model3d.geometry.lw_ratio})`
+        : " · geometry withheld: too little confirmed structure"}</div>
+    <img src="${model3d.turntable}" style="width:100%;border-radius:4px"
+         alt="turntable with provenance overlay">
+    <div class="sub"><span style="color:#3ddc84">green</span> = confirmed from
+      sightings · <span style="color:#ff5d5d">red</span> = generative-prior guess ·
+      downloads: <a href="${model3d.exports.splat}">model.splat</a>,
+      <a href="${model3d.exports.provenance_ply}">provenance .ply</a></div>` : ""}
     <table><tr><th colspan="3">Profile updates (all gated + reversible)</th></tr>${updates ||
       "<tr><td colspan=3>none — the gate has not opened</td></tr>"}</table>
     <table><tr><th colspan="3">Recent corroboration chain</th></tr>${chain ||
