@@ -140,15 +140,16 @@ def _draw_instance_attrs(cv2, img, vehicle, rng, x0, y0, bw, bh, y1) -> None:
         cv2.ellipse(img, (cx, cy), (14, 8), 20, 0, 360, (70, 70, 75), -1)
 
 
-def render_frame(
+def render_frame_with_box(
     vehicle: VehicleIdentity,
     camera: CameraSpec,
     timestamp_s: float,
-) -> np.ndarray:
-    """Full simulated camera frame: road scene with the vehicle composited in.
+) -> tuple[np.ndarray, tuple[int, int, int, int]]:
+    """Full simulated camera frame + the vehicle's placement box (xyxy).
 
-    Used when exercising the detector stage; single-vehicle frames keep the
-    demo honest about what the sim can support (no dense traffic scenes).
+    The box is the simulator's ground-truth region. The perception layer
+    uses it only as an honest fallback when the real detector cannot find
+    the cartoon sprite (recorded as detection_source="sim-fallback").
     """
     import cv2
 
@@ -166,4 +167,27 @@ def render_frame(
     x = rng.randint(20, FRAME_W - cw - 20)
     y = rng.randint(FRAME_H // 2 - 20, FRAME_H - ch - 10)
     frame[y:y + ch, x:x + cw] = crop
-    return frame
+    return frame, (x, y, x + cw, y + ch)
+
+
+def render_frame(
+    vehicle: VehicleIdentity,
+    camera: CameraSpec,
+    timestamp_s: float,
+) -> np.ndarray:
+    """Simulated camera frame (see render_frame_with_box)."""
+    return render_frame_with_box(vehicle, camera, timestamp_s)[0]
+
+
+def render_passage(
+    vehicle: VehicleIdentity,
+    camera: CameraSpec,
+    timestamp_s: float,
+    n_frames: int = 4,
+    frame_gap_s: float = 0.25,
+) -> list[tuple[np.ndarray, tuple[int, int, int, int]]]:
+    """A short burst of frames for one camera passage (for ByteTrack dedup)."""
+    return [
+        render_frame_with_box(vehicle, camera, timestamp_s + i * frame_gap_s)
+        for i in range(n_frames)
+    ]
