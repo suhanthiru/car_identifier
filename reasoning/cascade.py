@@ -24,36 +24,33 @@ Verdicts:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Callable, Sequence
+from typing import Any, Callable, Sequence
 
 from perception.embedder import max_similarity
 from perception.types import Observation
-from reasoning.facts import KIND_SUPPORT, Fact, has_veto, info, support
+from reasoning.facts import Fact, info, support
 from reasoning.plausibility import run_all_checks
 from reasoning.profile import TargetProfile
+from reasoning.signals import MatchSignals, compute_signals
+from reasoning.weights import (
+    CONFIRM_THRESHOLD, LIKELY_THRESHOLD, W_CLASS_ATTRS, W_GEOMETRY,
+    W_INSTANCE_ATTR, W_PLATE_EXACT, W_PLATE_NEAR, W_REID_MAX,
+)
 from sim.road_graph import RoadGraph
 
 VERDICT_CONFIRMED = "confirmed"
 VERDICT_LIKELY = "likely"
 VERDICT_UNDECIDED = "undecided"
 VERDICT_REJECTED = "rejected"
+# Feature B: evidence is real but too generic to name one vehicle. Non-
+# associable; routes to review with a candidate set. Falls through every
+# `verdict in (CONFIRMED, LIKELY)` gate downstream, so it auto-fires nothing.
+VERDICT_CANDIDATE = "candidate"
 
-# Evidence weights. Deliberately simple and inspectable — these are design
-# constants, not learned parameters.
-W_PLATE_EXACT = 0.90
-W_PLATE_NEAR = 0.35
-W_CLASS_ATTRS = 0.20
-W_INSTANCE_ATTR = 0.25
-# 3D-geometry consistency (car3d bridge): attribute-tier evidence, small on
-# purpose — view-invariant but coarse; it narrows, it does not identify.
-W_GEOMETRY = 0.10
-W_REID_MAX = 0.30        # ReID can contribute at most this much
-LIKELY_THRESHOLD = 0.45
-CONFIRM_THRESHOLD = 0.85
 
 # Default ReID similarity -> [0,1] squash. Replaced by isotonic calibration
-# in calibration/ (Phase 8); this fallback is a crude linear map and is
-# labeled as such in decisions that use it.
+# in calibration/; this fallback is a crude linear map and is labeled as such
+# in decisions that use it.
 def _uncalibrated_reid_prob(sim: float) -> float:
     return max(0.0, min(1.0, (sim - 0.5) / 0.5))
 
@@ -71,12 +68,78 @@ class MatchDecision:
     # True when a plate matched but plausibility vetoed: the classic
     # cloned-plate / clock-skew anomaly. Surfaced loudly in the console.
     anomaly: bool = False
+    # Structured signals behind this decision (feature foundation).
+    signals: MatchSignals | None = None
+    # Feature B: how uniquely the confirmed evidence names a vehicle [0,1].
+    distinctiveness: float = 1.0
+    refused_to_individuate: bool = False
+    candidate_ids: tuple[str, ...] = ()
+    # Feature C: nearest single-signal changes that flip the outcome.
+    # Typed as Any to avoid a cascade<->counterfactual import cycle.
+    counterfactuals: tuple[Any, ...] = ()
+
+
+@dataclass(frozen=True)
+class ScoredDecision:
+    """Pure output of the numeric policy — no facts, no side effects."""
+
+    verdict: str
+    score: float
+    deciding_tier: str
+    anomaly: bool
+    requires_review: bool
 
 
 @dataclass(frozen=True)
 class CascadeConfig:
     reid_prob_fn: Callable[[float], float] = _uncalibrated_reid_prob
     reid_calibration_label: str = "uncalibrated-linear"
+
+
+def score_from_signals(signals: MatchSignals, config: CascadeConfig | None = None) -> ScoredDecision:
+    """The entire numeric verdict policy, as a pure function of the signals.
+
+    Reproduces the historical scoring exactly. The counterfactual engine
+    re-runs THIS function on perturbed signals, so its flip points are
+    provably faithful to the live rule rather than reconstructed prose.
+    """
+    vetoed = signals.any_veto
+    score = 0.0
+    tier = "none"
+    if signals.plate_exact:
+        score += W_PLATE_EXACT
+        tier = "plate"
+    elif signals.plate_near:
+        score += W_PLATE_NEAR
+        tier = "plate"
+    if signals.attrs_consistent:
+        score += W_CLASS_ATTRS
+        if tier == "none":
+            tier = "attributes"
+    if signals.mark_match_count:
+        score += W_INSTANCE_ATTR * signals.mark_match_count
+        if tier in ("none", "attributes"):
+            tier = "attributes"
+    if signals.geometry_consistent:
+        score += W_GEOMETRY
+        if tier == "none":
+            tier = "attributes"
+    if signals.has_gallery and score > 0 and not vetoed:
+        # ReID only refines an already-supported candidate — never rescues one.
+        score += W_REID_MAX * signals.reid_prob
+        if tier == "none":
+            tier = "reid"
+    score = min(1.0, score)
+
+    if vetoed:
+        anomaly = signals.plate_exact  # plate says yes, physics/logic says no
+        return ScoredDecision(VERDICT_REJECTED, 0.0, tier, anomaly, requires_review=anomaly)
+    if signals.plate_exact and score >= CONFIRM_THRESHOLD:
+        return ScoredDecision(VERDICT_CONFIRMED, score, tier, False, False)
+    if score >= LIKELY_THRESHOLD:
+        # Appearance/attribute evidence alone never auto-confirms.
+        return ScoredDecision(VERDICT_LIKELY, score, tier, False, True)
+    return ScoredDecision(VERDICT_UNDECIDED, score, tier, False, False)
 
 
 def evaluate(
@@ -88,17 +151,11 @@ def evaluate(
     """Score one observation against one target, with full explanation."""
     cfg = config or CascadeConfig()
     facts = list(run_all_checks(obs, profile, graph))
-
-    plate_support = [f for f in facts if f.check == "plate" and f.kind == KIND_SUPPORT]
-    plate_exact = any("exactly matches" in f.text for f in plate_support)
-    plate_near = any("OCR-confusable" in f.text for f in plate_support)
-    attrs_support = any(f.check == "attributes" and f.kind == KIND_SUPPORT
-                        and f.text.startswith("Class attributes") for f in facts)
-    mark_matches = sum(1 for f in facts if f.check == "attributes"
-                       and f.kind == KIND_SUPPORT and "mark matches" in f.text)
+    signals = compute_signals(obs, profile, graph)
 
     reid_sim = max_similarity(obs.embedding, list(profile.gallery))
     reid_p = cfg.reid_prob_fn(reid_sim) if profile.gallery else 0.0
+    signals = signals.with_reid(bool(profile.gallery), reid_sim, reid_p)
     if profile.gallery:
         facts.append(info(
             f"Appearance similarity {reid_sim:.2f} vs target gallery "
@@ -107,61 +164,18 @@ def evaluate(
     else:
         facts.append(info("Target has no appearance gallery yet; ReID unavailable.", "reid"))
 
-    vetoed = has_veto(facts)
-    score = 0.0
-    tier = "none"
-    if plate_exact:
-        score += W_PLATE_EXACT
-        tier = "plate"
-    elif plate_near:
-        score += W_PLATE_NEAR
-        tier = "plate"
-    if attrs_support:
-        score += W_CLASS_ATTRS
-        if tier == "none":
-            tier = "attributes"
-    if mark_matches:
-        score += W_INSTANCE_ATTR * mark_matches
-        if tier in ("none", "attributes"):
-            tier = "attributes"
-    geometry_support = any(f.check == "geometry" and f.kind == KIND_SUPPORT
-                           for f in facts)
-    if geometry_support:
-        score += W_GEOMETRY
-        if tier == "none":
-            tier = "attributes"
-    if profile.gallery and score > 0 and not vetoed:
-        # ReID only refines an already-supported candidate — never rescues
-        # one with no symbolic evidence.
-        score += W_REID_MAX * reid_p
-        if tier == "none":
-            tier = "reid"
-    score = min(1.0, score)
+    scored = score_from_signals(signals, cfg)
+    if scored.anomaly:
+        facts.append(support(
+            "Anomaly: plate matches but a hard veto fired — possible plate "
+            "clone or camera clock skew. Flagged for review.", "plate"))
 
-    if vetoed:
-        anomaly = plate_exact  # plate says yes, physics/logic says no
-        if anomaly:
-            facts.append(support(
-                "Anomaly: plate matches but a hard veto fired — possible plate "
-                "clone or camera clock skew. Flagged for review.", "plate"))
-        return MatchDecision(
-            target_id=profile.target_id, event_id=obs.event_id,
-            verdict=VERDICT_REJECTED, score=0.0, deciding_tier=tier,
-            facts=tuple(facts), reid_similarity=reid_sim,
-            requires_review=anomaly, anomaly=anomaly,
-        )
-
-    if plate_exact and score >= CONFIRM_THRESHOLD:
-        verdict, review = VERDICT_CONFIRMED, False
-    elif score >= LIKELY_THRESHOLD:
-        # Appearance/attribute evidence alone never auto-confirms.
-        verdict, review = VERDICT_LIKELY, True
-    else:
-        verdict, review = VERDICT_UNDECIDED, False
     return MatchDecision(
         target_id=profile.target_id, event_id=obs.event_id,
-        verdict=verdict, score=score, deciding_tier=tier,
-        facts=tuple(facts), reid_similarity=reid_sim, requires_review=review,
+        verdict=scored.verdict, score=scored.score, deciding_tier=scored.deciding_tier,
+        facts=tuple(facts), reid_similarity=reid_sim,
+        requires_review=scored.requires_review, anomaly=scored.anomaly,
+        signals=signals,
     )
 
 
