@@ -218,10 +218,12 @@ class FleetTracker:
         facts_text = render_facts(list(decision.facts))
         if note:
             facts_text = note + "\n" + facts_text
+        cfs = [c.text for c in decision.counterfactuals]
         return TrackerEvent(
             kind=kind, target_id=decision.target_id,
             event_id=obs.event_id, timestamp_s=obs.timestamp_s,
             detail={"review_id": review_id, "facts": facts_text,
+                    "counterfactuals": cfs,
                     "score": decision.score, "rivals": list(rivals)})
 
     # ------------------------------------------------------------- reviews

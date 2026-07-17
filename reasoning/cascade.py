@@ -194,6 +194,10 @@ def evaluate(
             f"class-level and cannot name one vehicle. Returning a candidate set "
             f"for human review; nothing auto-fires.", "distinctiveness"))
 
+    # Lazy import breaks the cascade<->counterfactual cycle: the engine
+    # re-runs score_from_signals, so it must import this module.
+    from reasoning.counterfactual import counterfactuals as _counterfactuals
+
     return MatchDecision(
         target_id=profile.target_id, event_id=obs.event_id,
         verdict=scored.verdict, score=scored.score, deciding_tier=scored.deciding_tier,
@@ -201,6 +205,7 @@ def evaluate(
         requires_review=scored.requires_review, anomaly=scored.anomaly,
         signals=signals, distinctiveness=scored.distinctiveness,
         refused_to_individuate=scored.refused_to_individuate,
+        counterfactuals=_counterfactuals(signals, cfg),
     )
 
 
