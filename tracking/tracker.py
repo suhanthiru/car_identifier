@@ -98,6 +98,11 @@ class FleetTracker:
     def targets(self) -> dict[str, TrackedTarget]:
         return dict(self._targets)
 
+    def replace_profile(self, target_id: str, profile: TargetProfile) -> None:
+        """Operator-authority profile swap (server records the audit row)."""
+        tracked = self._targets[target_id]
+        self._targets[target_id] = replace(tracked, profile=profile)
+
     def pending_reviews(self) -> tuple[PendingReview, ...]:
         return tuple(self._reviews.values())
 
