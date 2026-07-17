@@ -154,6 +154,17 @@ def apply_operator_confirmation(
         "corroboration")]
 
 
+def apply_operator_rejection(
+    state: CorroborationState, now_s: float
+) -> tuple[CorroborationState, list[Fact]]:
+    """A human reviewed the crops and rejected the proposed match."""
+    state = decay(state, now_s)
+    new_belief = max(0.0, state.belief - VETO_PENALTY)
+    return replace(state, belief=new_belief), [caution(
+        f"Operator rejected the match; track belief reduced to {new_belief:.2f}.",
+        "corroboration")]
+
+
 def noisy_or(probabilities: list[float]) -> float:
     """The WRONG fusion rule for this problem — kept for tests and docs to
     demonstrate the trap, never used in the live pipeline."""
