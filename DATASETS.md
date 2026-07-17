@@ -55,10 +55,14 @@ VehicleID/
 - Real multi-camera traffic video with camera calibrations, timestamps, and
   cross-camera vehicle trajectories — what the transit-time veto and
   corroboration validation need.
-- **How to get it**: register for the AI City Challenge data
-  (`aicitychallenge.org` → Data and Evaluation → request Track 1 MTMC
-  data; requires signing their data-use agreement). The MTMC package is
-  sometimes labeled CityFlowV2.
+- **How to get it**: as of mid-2026 the AI City Challenge removed the
+  request-form/password gate. The relevant package is **2022 Track 1:
+  City-Scale Multi-Camera Vehicle Tracking** (CityFlowV2), linked from
+  `aicitychallenge.org/ai-city-challenge-dataset-access/` → the
+  2022-track1-download page (Google Drive). Downloading still means
+  accepting their *Dataset License AIC2022* (PDF on that page) — read it;
+  it restricts use to non-commercial research. The 2021 Track 2 ReID
+  package on the same page is a useful optional extra.
 - Layout (`EYES_CITYFLOW_ROOT`, default `data/datasets/CityFlow`):
 
 ```
