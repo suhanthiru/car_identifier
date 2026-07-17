@@ -103,6 +103,19 @@ def test_cityflow_spans_and_transitions(tmp_path):
     assert gps["c001"] == pytest.approx((960 + 42.5, 540 - 90.25))
 
 
+def test_cityflow_applies_camera_timing_offsets(tmp_path):
+    """AIC22 cameras start at different wall-clock times; without the offset
+    the c001->c002 transit time is wrong."""
+    root = make_cityflow(tmp_path)
+    # c002 actually starts 100s after c001 on the shared clock.
+    (root / "cam_timing").mkdir()
+    (root / "cam_timing" / "S01.txt").write_text("c001 0.0 10\nc002 100.0 10\n")
+    scen = CityFlow(root).load_scenario("S01")
+    hop = next(t for t in scen.transitions() if t.vehicle_id == 7)
+    # enter c002 at 12.0s local + 100s offset - exit c001 at 4.0s = 108.0s
+    assert hop.elapsed_s == pytest.approx(108.0)
+
+
 def test_homography_parser_variants():
     H = parse_homography("Homography matrix: 1 2 3;4 5 6;7 8 9")
     assert H is not None and H[2, 2] == 9
