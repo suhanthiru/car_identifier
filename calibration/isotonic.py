@@ -63,8 +63,11 @@ class CalibrationReport:
 
 
 def _version_of(pairs: list[SimilarityPair]) -> str:
+    # Versioned by pair content only (similarity, label, hardness), so any
+    # pair-like object works — synthetic SimilarityPairs and real MinedPairs
+    # alike — and the version changes iff the calibration data changes.
     h = hashlib.sha1()
-    for p in sorted(pairs, key=lambda p: (p.vehicle_a, p.vehicle_b, p.similarity)):
+    for p in sorted(pairs, key=lambda p: (p.similarity, p.same_vehicle, p.hard_negative)):
         h.update(f"{p.similarity:.6f}|{p.same_vehicle}|{p.hard_negative}".encode())
     return h.hexdigest()[:10]
 
