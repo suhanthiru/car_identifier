@@ -116,6 +116,20 @@ class AlertRow(SQLModel, table=True):
     detail: str = "{}"             # JSON
 
 
+class AuditRow(SQLModel, table=True):
+    __tablename__ = "audit_log"
+    # Append-only, hash-chained (see audit/). id is storage order; seq is the
+    # chain position. entry_hash commits to prev_hash + the entry contents.
+    id: int | None = Field(default=None, primary_key=True)
+    seq: int = Field(index=True)
+    timestamp_s: float = 0.0
+    actor: str = ""
+    action: str = Field(default="", index=True)
+    payload_digest: str = ""
+    prev_hash: str = ""
+    entry_hash: str = ""
+
+
 def make_engine(db_url: str = DEFAULT_DB_URL, echo: bool = False):
     connect_args = {"check_same_thread": False} if db_url.startswith("sqlite") else {}
     engine = create_engine(db_url, echo=echo, connect_args=connect_args)
