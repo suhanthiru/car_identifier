@@ -18,6 +18,13 @@ torchreid==0.2.5       # OSNet ReID backbone
 gdown==6.1.0           # torchreid weight downloads
 tensorboard==2.21.0    # torchreid import-time dependency (unused here)
 
+# Evaluation
+matplotlib==3.11.0
+
+# 3D vehicle model bridge (local project, installed editable):
+#   pip install -e D:\comp_vison_projs\Car_Gen_and_Modeling_proj
+# cargen provides single-photo 3DGS reconstruction + gated fusion; see car3d/.
+
 # Testing
 pytest==8.3.4
 httpx==0.28.1

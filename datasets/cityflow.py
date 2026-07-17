@@ -1,0 +1,175 @@
+"""CityFlow / AI City MTMC loader.
+
+What the cross-camera validation needs from the release:
+- per-camera ground-truth tracks (`gt/gt.txt`, MOT format:
+  frame,id,left,top,width,height,...) with a shared vehicle-id space
+  per scenario;
+- camera calibration (`calibration.txt`: a 3x3 homography image->GPS,
+  formatted as `Homography matrix: r1;r2;r3` in most releases);
+- frame rate (10 fps for the published scenarios unless a cfg says otherwise).
+
+From those we derive REAL cross-camera transitions: for each vehicle,
+consecutive (camera, exit_time) -> (camera, entry_time) hops with their
+elapsed seconds — the ground truth against which the transit-time veto and
+the corroboration fusion are validated. Presence-gated; see DATASETS.md.
+"""
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+from pathlib import Path
+
+import numpy as np
+
+from datasets.config import cityflow_root
+
+DEFAULT_FPS = 10.0
+
+
+@dataclass(frozen=True)
+class TrackSpan:
+    """One vehicle's contiguous presence at one camera."""
+
+    scenario: str
+    camera_id: str
+    vehicle_id: int
+    enter_s: float
+    exit_s: float
+
+
+@dataclass(frozen=True)
+class Transition:
+    """A real cross-camera hop by one ground-truth vehicle."""
+
+    scenario: str
+    vehicle_id: int
+    from_camera: str
+    to_camera: str
+    elapsed_s: float    # to.enter - from.exit; can be negative (overlap)
+
+
+@dataclass(frozen=True)
+class CityFlowScenario:
+    name: str
+    cameras: tuple[str, ...]
+    homographies: dict[str, np.ndarray]      # camera -> 3x3 image->GPS
+    spans: tuple[TrackSpan, ...]
+
+    def transitions(self, min_gap_s: float = -5.0) -> tuple[Transition, ...]:
+        """Consecutive camera hops per vehicle, time-ordered.
+
+        Small negative gaps are kept (fields of view overlap in reality);
+        `min_gap_s` only filters annotation glitches.
+        """
+        by_vehicle: dict[int, list[TrackSpan]] = {}
+        for span in self.spans:
+            by_vehicle.setdefault(span.vehicle_id, []).append(span)
+        out: list[Transition] = []
+        for vid, spans in sorted(by_vehicle.items()):
+            spans.sort(key=lambda s: s.enter_s)
+            for a, b in zip(spans, spans[1:]):
+                if a.camera_id == b.camera_id:
+                    continue
+                gap = b.enter_s - a.exit_s
+                if gap >= min_gap_s:
+                    out.append(Transition(
+                        scenario=self.name, vehicle_id=vid,
+                        from_camera=a.camera_id, to_camera=b.camera_id,
+                        elapsed_s=round(gap, 2)))
+        return tuple(out)
+
+    def camera_gps(self) -> dict[str, tuple[float, float]]:
+        """Approximate camera GPS: the homography image-center mapping."""
+        out = {}
+        for cam, H in self.homographies.items():
+            pt = H @ np.array([960.0, 540.0, 1.0])
+            if abs(pt[2]) > 1e-12:
+                out[cam] = (float(pt[0] / pt[2]), float(pt[1] / pt[2]))
+        return out
+
+
+class CityFlow:
+    def __init__(self, root: Path | None = None):
+        self.root = root or cityflow_root()
+        if not self.exists(self.root):
+            raise FileNotFoundError(
+                f"CityFlow not found at {self.root}. The AI City Challenge data "
+                f"requires a signed request — see DATASETS.md.")
+
+    @staticmethod
+    def exists(root: Path | None = None) -> bool:
+        root = root or cityflow_root()
+        return any(root.glob("*/S*/c*/gt/gt.txt"))
+
+    def scenario_names(self) -> list[str]:
+        return sorted({p.parent.name for split in self.root.iterdir() if split.is_dir()
+                       for p in split.glob("S*/c*") if (p / "gt" / "gt.txt").exists()
+                       for p in [p.parent / p.name]} |
+                      {p.name for split in self.root.iterdir() if split.is_dir()
+                       for p in split.glob("S*") if any(p.glob("c*/gt/gt.txt"))})
+
+    def load_scenario(self, name: str, fps: float = DEFAULT_FPS) -> CityFlowScenario:
+        scen_dir = next((d for split in sorted(self.root.iterdir()) if split.is_dir()
+                         for d in [split / name] if d.is_dir()), None)
+        if scen_dir is None:
+            raise FileNotFoundError(f"scenario {name} not under {self.root}")
+        cameras, spans, homographies = [], [], {}
+        for cam_dir in sorted(scen_dir.glob("c*")):
+            gt = cam_dir / "gt" / "gt.txt"
+            if not gt.exists():
+                continue
+            cameras.append(cam_dir.name)
+            spans.extend(_spans_from_gt(gt, name, cam_dir.name, fps))
+            calib = cam_dir / "calibration.txt"
+            if calib.exists():
+                H = parse_homography(calib.read_text())
+                if H is not None:
+                    homographies[cam_dir.name] = H
+        return CityFlowScenario(
+            name=name, cameras=tuple(cameras),
+            homographies=homographies, spans=tuple(spans))
+
+
+def parse_homography(text: str) -> np.ndarray | None:
+    """Parse `Homography matrix: a b c;d e f;g h i` (variants tolerated)."""
+    m = re.search(r"[Hh]omography[^:]*:\s*([-\d.eE+\s;,]+)", text)
+    if not m:
+        return None
+    rows = [r for r in re.split(r";", m.group(1).strip()) if r.strip()]
+    if len(rows) != 3:
+        return None
+    try:
+        H = np.array([[float(v) for v in re.split(r"[,\s]+", r.strip()) if v]
+                      for r in rows], dtype=np.float64)
+    except ValueError:
+        return None
+    return H if H.shape == (3, 3) else None
+
+
+def _spans_from_gt(
+    gt_path: Path, scenario: str, camera_id: str, fps: float
+) -> list[TrackSpan]:
+    """Collapse per-frame MOT rows into one presence span per vehicle.
+
+    CityFlow GT tracks don't leave and re-enter the same camera within a
+    scenario in any way that matters for transit stats, so min/max frame per
+    id is sufficient — and robust to occasional dropped frames.
+    """
+    first: dict[int, int] = {}
+    last: dict[int, int] = {}
+    for line in gt_path.read_text().splitlines():
+        parts = line.replace(";", ",").split(",")
+        if len(parts) < 6:
+            continue
+        try:
+            frame, vid = int(parts[0]), int(parts[1])
+        except ValueError:
+            continue
+        first[vid] = min(first.get(vid, frame), frame)
+        last[vid] = max(last.get(vid, frame), frame)
+    return [
+        TrackSpan(scenario=scenario, camera_id=camera_id, vehicle_id=vid,
+                  enter_s=round(first[vid] / fps, 2),
+                  exit_s=round(last[vid] / fps, 2))
+        for vid in sorted(first)
+    ]

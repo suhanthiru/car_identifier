@@ -10,4 +10,5 @@ addopts = "-q"
 markers = ["slow: loads real model weights; excluded with -m 'not slow'"]
 
 [tool.setuptools]
-packages = ["sim", "perception", "reasoning", "tracking", "server", "calibration"]
+packages = ["sim", "perception", "reasoning", "tracking", "server", "calibration",
+            "datasets", "eval", "car3d"]
