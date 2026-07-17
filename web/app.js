@@ -158,15 +158,18 @@ async function refreshReviews() {
   el.innerHTML = reviews.length ? "" : `<div class="alert-row">queue empty</div>`;
   reviews.forEach((r) => {
     const card = document.createElement("div");
-    card.className = `review-card${r.kind === "anomaly" ? " anomaly" : ""}`;
+    const refused = (r.facts || "").includes("Cannot assert individual");
+    card.className = `review-card${r.kind === "anomaly" ? " anomaly" : ""}${refused ? " refused" : ""}`;
     const sightingImg = r.sighting_crop
       ? `<img src="${r.sighting_crop}" alt="sighting crop">`
       : `<div class="no-crop">no crop</div>`;
     const refImg = r.reference_crop
       ? `<img src="${r.reference_crop}" alt="reference crop">`
       : `<div class="no-crop">no reference yet</div>`;
+    const prefix = r.kind === "anomaly" ? "ANOMALY — "
+      : refused ? "CANDIDATE SET — " : "";
     card.innerHTML = `
-      <b>${r.kind === "anomaly" ? "ANOMALY — " : ""}${escapeHtml(r.target_label || r.target_id)}</b>
+      <b>${prefix}${escapeHtml(r.target_label || r.target_id)}</b>
       <span style="float:right;color:var(--dim)">score ${r.score.toFixed(2)}</span>
       <div class="crops">
         <figure>${sightingImg}<figcaption>this sighting</figcaption></figure>
