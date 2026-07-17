@@ -74,6 +74,7 @@ section h2 {
   border-radius: 4px; padding: 8px; margin-bottom: 8px; font-size: 12px;
 }
 .review-card.anomaly { border-color: var(--veto); }
+.review-card.refused { border-color: var(--tentative); }
 .review-card .crops { display: flex; gap: 8px; margin: 6px 0; }
 .review-card .crops figure { flex: 1; text-align: center; }
 .review-card .crops img {
