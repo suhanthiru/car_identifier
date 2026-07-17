@@ -73,8 +73,12 @@ def test_ambiguous_lookalikes_go_to_review_not_association(graph):
     events = tracker.process_observation(obs)
     assert [e.kind for e in events] == ["review"]
     review = tracker.pending_reviews()[0]
+    # Class-level evidence over two look-alikes: the distinctiveness floor
+    # refuses to name one and lists both as the candidate set.
     assert review.rival_target_ids
-    assert "Ambiguous" in events[0].detail["facts"]
+    facts = events[0].detail["facts"]
+    assert "Cannot assert individual" in facts
+    assert "tgt-a" in facts and "tgt-b" in facts
     for t in tracker.targets().values():
         assert t.profile.version == 0
         assert t.track.consecutive_sightings == 0
@@ -97,10 +101,13 @@ def test_operator_accept_confirms_and_updates(graph):
 
 
 def test_operator_reject_penalizes_belief(graph):
-    tracker = flagged_tracker(graph, plate="",
-                              instance_attrs={"accessory": "roof rack"})
-    tracker.process_observation(make_obs(instance_attrs={"accessory": "roof rack"}))
+    # Two marks so the target individuates (LIKELY), associates, and builds
+    # belief — which the operator rejection then penalizes.
+    marks = {"accessory": "roof rack", "sticker": "oval bumper sticker"}
+    tracker = flagged_tracker(graph, plate="", instance_attrs=dict(marks))
+    tracker.process_observation(make_obs(instance_attrs=dict(marks)))
     before = tracker.targets()["tgt-1"].corroboration.belief
+    assert before > 0
     review = tracker.pending_reviews()[0]
     events = tracker.resolve_review(review.review_id, accept=False, now_s=1100.0)
     assert [e.kind for e in events] == ["rejection"]

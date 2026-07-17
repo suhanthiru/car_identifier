@@ -21,7 +21,8 @@ from typing import Mapping
 
 from perception.types import Observation
 from reasoning.cascade import (
-    VERDICT_CONFIRMED, VERDICT_LIKELY, CascadeConfig, MatchDecision, rank_candidates,
+    VERDICT_CANDIDATE, VERDICT_CONFIRMED, VERDICT_LIKELY, CascadeConfig,
+    MatchDecision, rank_candidates,
 )
 from reasoning.corroboration import (
     CorroborationState, apply_decision, apply_operator_confirmation,
@@ -120,6 +121,19 @@ class FleetTracker:
 
         if best.anomaly:
             events.append(self._queue_review(obs, best, kind="anomaly"))
+        if best.refused_to_individuate:
+            # Distinctiveness floor (feature B): class-level evidence names a
+            # set, not a vehicle. Route to review with the candidate set; never
+            # associate, so no alert auto-fires.
+            others = tuple(c for c in best.candidate_ids if c != best.target_id)
+            listed = ", ".join(best.candidate_ids) or best.target_id
+            events.append(self._queue_review(
+                obs, best, kind="review", rivals=others,
+                note=(f"Cannot assert individual (distinctiveness "
+                      f"{best.distinctiveness:.2f}): evidence is class-level. "
+                      f"Narrowed to {len(best.candidate_ids) or 1} candidate(s): "
+                      f"{listed}. Human review required.")))
+            return events
         if best.verdict not in (VERDICT_CONFIRMED, VERDICT_LIKELY):
             if best.verdict == "rejected":
                 tracked = self._targets[best.target_id]
