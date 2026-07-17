@@ -113,13 +113,20 @@ class CityFlow:
                          for d in [split / name] if d.is_dir()), None)
         if scen_dir is None:
             raise FileNotFoundError(f"scenario {name} not under {self.root}")
+        # AIC22 cameras in one scenario start at different wall-clock times;
+        # the offsets (seconds) are essential — cross-camera transit times are
+        # meaningless without them. They live in the scenario/camera dir or a
+        # cam_timing file; missing => 0 offset (single-clock fallback).
+        offsets = _load_timing_offsets(scen_dir, self.root, name)
         cameras, spans, homographies = [], [], {}
         for cam_dir in sorted(scen_dir.glob("c*")):
             gt = cam_dir / "gt" / "gt.txt"
             if not gt.exists():
                 continue
             cameras.append(cam_dir.name)
-            spans.extend(_spans_from_gt(gt, name, cam_dir.name, fps))
+            cam_fps = _read_seqinfo_fps(cam_dir, fps)
+            offset = offsets.get(cam_dir.name, 0.0)
+            spans.extend(_spans_from_gt(gt, name, cam_dir.name, cam_fps, offset))
             calib = cam_dir / "calibration.txt"
             if calib.exists():
                 H = parse_homography(calib.read_text())
@@ -147,13 +154,14 @@ def parse_homography(text: str) -> np.ndarray | None:
 
 
 def _spans_from_gt(
-    gt_path: Path, scenario: str, camera_id: str, fps: float
+    gt_path: Path, scenario: str, camera_id: str, fps: float, offset_s: float = 0.0
 ) -> list[TrackSpan]:
     """Collapse per-frame MOT rows into one presence span per vehicle.
 
     CityFlow GT tracks don't leave and re-enter the same camera within a
     scenario in any way that matters for transit stats, so min/max frame per
-    id is sufficient — and robust to occasional dropped frames.
+    id is sufficient — and robust to occasional dropped frames. `offset_s`
+    shifts this camera onto the shared scenario clock.
     """
     first: dict[int, int] = {}
     last: dict[int, int] = {}
@@ -169,7 +177,47 @@ def _spans_from_gt(
         last[vid] = max(last.get(vid, frame), frame)
     return [
         TrackSpan(scenario=scenario, camera_id=camera_id, vehicle_id=vid,
-                  enter_s=round(first[vid] / fps, 2),
-                  exit_s=round(last[vid] / fps, 2))
+                  enter_s=round(first[vid] / fps + offset_s, 2),
+                  exit_s=round(last[vid] / fps + offset_s, 2))
         for vid in sorted(first)
     ]
+
+
+def _read_seqinfo_fps(cam_dir: Path, default: float) -> float:
+    """Per-camera fps from an MOT-style seqinfo.ini, if the release ships one."""
+    seqinfo = cam_dir / "seqinfo.ini"
+    if not seqinfo.exists():
+        return default
+    m = re.search(r"frameRate\s*=\s*([\d.]+)", seqinfo.read_text())
+    return float(m.group(1)) if m else default
+
+
+def _load_timing_offsets(scen_dir: Path, root: Path, name: str) -> dict[str, float]:
+    """Camera start offsets (seconds) onto the shared scenario clock.
+
+    AIC22 ships these as `cam_timing/<scenario>.txt` with lines
+    `<camera> <offset_seconds> [fps]`. Some releases place a per-scenario
+    file directly in the scenario dir. Absent => empty (single-clock), which
+    the loader treats as zero offset for every camera.
+    """
+    candidates = [
+        root / "cam_timing" / f"{name}.txt",
+        scen_dir / "cam_timing.txt",
+        scen_dir / f"{name}.txt",
+    ]
+    for path in candidates:
+        if not path.exists():
+            continue
+        offsets: dict[str, float] = {}
+        for line in path.read_text().splitlines():
+            parts = line.split()
+            if len(parts) < 2:
+                continue
+            cam = parts[0] if parts[0].startswith("c") else f"c{int(parts[0]):03d}"
+            try:
+                offsets[cam] = float(parts[1])
+            except ValueError:
+                continue
+        if offsets:
+            return offsets
+    return {}
