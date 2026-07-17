@@ -44,8 +44,19 @@ def create_app(
     graph: RoadGraph | None = None,
     db_url: str = dbm.DEFAULT_DB_URL,
     crops_dir: str = "data/crops",
+    calibration_path: str = "calibration/artifacts/latest.json",
 ) -> FastAPI:
     graph = graph or default_world()
+    cascade_config = None
+    if calibration_path and Path(calibration_path).is_file():
+        # Versioned isotonic map: decisions cite `isotonic-<version>` in
+        # their fact lists instead of the uncalibrated fallback.
+        from calibration.isotonic import load_model, make_reid_prob_fn
+        from reasoning.cascade import CascadeConfig
+
+        prob_fn, label = make_reid_prob_fn(load_model(calibration_path))
+        cascade_config = CascadeConfig(reid_prob_fn=prob_fn,
+                                       reid_calibration_label=label)
     app = FastAPI(title="Eyes Everywhere (synthetic demo)")
     Path(crops_dir).mkdir(parents=True, exist_ok=True)
     if db_url.startswith("sqlite:///"):
@@ -60,7 +71,7 @@ def create_app(
     state = app.state
     state.graph = graph
     state.engine = engine
-    state.tracker = FleetTracker(graph)
+    state.tracker = FleetTracker(graph, cascade_config)
     state.manager = ConnectionManager()
     state.crops_dir = Path(crops_dir)
     state.sim_now = 0.0
