@@ -12,6 +12,8 @@ Off-the-shelf glue, not a contribution of this project. Notes for honesty:
 """
 from __future__ import annotations
 
+import threading
+
 import numpy as np
 
 # Input size (height, width). OSNet is fully convolutional + global pooling,
@@ -27,26 +29,32 @@ class ReidEmbedder:
         self._weights_path = weights_path
         self._model = None
         self._torch = None
+        self._load_lock = threading.Lock()
 
     def _load(self) -> None:
+        # Double-checked lock: concurrent edge tasks share one embedder and
+        # must not each pull the weights.
         if self._model is not None:
             return
-        import warnings
+        with self._load_lock:
+            if self._model is not None:
+                return
+            import warnings
 
-        import torch
+            import torch
 
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            import torchreid
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                import torchreid
 
-        model = torchreid.models.build_model(
-            name=self._arch, num_classes=1, pretrained=self._weights_path is None
-        )
-        if self._weights_path:
-            torchreid.reid.utils.load_pretrained_weights(model, self._weights_path)
-        model.eval()
-        self._model = model
-        self._torch = torch
+            model = torchreid.models.build_model(
+                name=self._arch, num_classes=1, pretrained=self._weights_path is None
+            )
+            if self._weights_path:
+                torchreid.reid.utils.load_pretrained_weights(model, self._weights_path)
+            model.eval()
+            self._torch = torch
+            self._model = model
 
     def embed(self, crop_bgr: np.ndarray) -> np.ndarray:
         return self.embed_batch([crop_bgr])[0]
