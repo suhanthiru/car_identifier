@@ -176,6 +176,11 @@ async function refreshReviews() {
         <figure>${refImg}<figcaption>target reference</figcaption></figure>
       </div>
       <div class="facts">${factsHtml(r.facts)}</div>
+      ${(r.counterfactuals && r.counterfactuals.length) ? `
+      <div class="counterfactuals">
+        <div class="cf-label">What would change the outcome</div>
+        ${r.counterfactuals.map((c) => `<div class="cf">→ ${escapeHtml(c)}</div>`).join("")}
+      </div>` : ""}
       <div class="actions">
         <button class="btn-accept">Accept match</button>
         <button class="btn-reject">Reject</button>

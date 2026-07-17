@@ -101,6 +101,7 @@ class ReviewRow(SQLModel, table=True):
     status: str = "pending"        # pending | accepted | rejected
     score: float = 0.0
     facts: str = ""
+    counterfactuals: str = "[]"    # JSON list of plain-English flip explanations
     rivals: str = "[]"             # JSON list of rival target ids
     created_s: float = 0.0
     resolved_s: float | None = None

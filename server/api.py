@@ -181,6 +181,7 @@ def create_app(
                     target_id=ev.target_id, event_id=ev.event_id, kind=ev.kind,
                     score=float(ev.detail.get("score", 0.0)),
                     facts=str(ev.detail.get("facts", "")),
+                    counterfactuals=dbm.dumps(list(ev.detail.get("counterfactuals", []))),
                     rivals=dbm.dumps(list(ev.detail.get("rivals", []))),
                     created_s=ev.timestamp_s))
             elif ev.kind == "profile_update":
@@ -401,6 +402,7 @@ def create_app(
                 out.append({
                     **r.model_dump(),
                     "rivals": dbm.loads(r.rivals),
+                    "counterfactuals": dbm.loads(r.counterfactuals) or [],
                     "sighting_crop": (f"/api/crops/{sighting.crop_path}"
                                       if sighting and sighting.crop_path else ""),
                     "reference_crop": (f"/api/crops/{target.reference_crop}"

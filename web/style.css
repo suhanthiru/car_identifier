@@ -96,6 +96,15 @@ section h2 {
 .facts .f-veto { color: var(--veto); }
 .facts .f-caution { color: var(--tentative); }
 .facts .f-info { color: var(--dim); }
+.counterfactuals {
+  background: #16202b; border-left: 3px solid var(--accent);
+  border-radius: 3px; padding: 6px 8px; margin: 6px 0; font-size: 11px;
+}
+.counterfactuals .cf-label {
+  color: var(--accent); text-transform: uppercase; letter-spacing: .06em;
+  font-size: 9px; margin-bottom: 3px;
+}
+.counterfactuals .cf { color: var(--text); line-height: 1.5; }
 .review-card .actions { display: flex; gap: 6px; }
 .review-card .actions button {
   flex: 1; padding: 6px; border: 0; border-radius: 4px; cursor: pointer;
