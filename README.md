@@ -1,103 +1,109 @@
 # Eyes Everywhere
 
-A real-time, distributed vehicle-tracking and re-identification demo that runs **entirely on synthetic data**. A simulated city of eight roadside cameras streams sightings of procedurally-generated vehicles — including deliberately confusable look-alikes — into a central reasoning server, which decides *which sightings belong to which flagged target*, explains every decision in plain English, and asks a human whenever the evidence is merely "it looks similar."
+A real-time, distributed vehicle-tracking and re-identification research demo whose headline deliverable is **honest, reproducible evaluation on public vehicle-ReID datasets** (VeRi-776, VehicleID, CityFlow). The system around the numbers — identity cascade, symbolic plausibility vetoes, capped-additive corroboration, a live operator console, and a per-target 3D model — exists to showcase and stress-test the method. Current results live in [RESULTS.md](RESULTS.md), regenerated end-to-end by one command.
 
-> **Synthetic data only.** Every camera, vehicle, plate, GPS coordinate, and crop in this system is fabricated. Nothing connects to real cameras, real ALPR feeds, or any real person's data. The ML models are stock, off-the-shelf glue; the contribution — and the point — is the **reasoning layer**: the identity cascade, the physical-plausibility vetoes, the corroboration math that refuses to double-count correlated evidence, and the tracker lifecycle around them.
+> **Data envelope.** Real data means established public research datasets obtained under their research-use terms, and nothing else — no scraped feeds, no covert footage, no non-consented camera data. Until those datasets are downloaded (they require manual request forms; see [DATASETS.md](DATASETS.md)), every real-data section of RESULTS.md reads **PENDING**: the harness never substitutes synthetic numbers for missing real ones. The always-runnable demo uses a clearly-labeled synthetic world.
 
-## Quick start
+## Reproduce the results
 
 ```
 python -m venv .venv
-.venv\Scripts\activate          # Windows  (source .venv/bin/activate elsewhere)
+.venv\Scripts\activate
 pip install -r requirements.txt
-pytest -m "not slow"            # ~130 tests, no model downloads needed
-python demo.py                  # spins up server + sim feed, opens the console
+pip install -e "D:\comp_vison_projs\Car_Gen_and_Modeling_proj"   # cargen, for the 3D bridge
+pytest -m "not slow"                 # ~150 tests, pure logic + fixtures
+# obtain datasets per DATASETS.md, then:
+python -m eval.run                   # regenerates RESULTS.md + figures
+python demo.py                       # synthetic live-console demo (no datasets needed)
 ```
 
-`demo.py` flags two targets from a look-alike cluster (one by plate, one by appearance only) and replays the world at 8× speed. Watch the plate target confirm itself while the appearance-only target piles up review-queue items that wait for you. Re-fit the calibration artifact anytime with `python -m calibration.run`.
+## What the evaluation measures
+
+1. **Retrieval** — Rank-1/5/10, mAP, CMC curves on VeRi-776 and VehicleID with the standard same-camera exclusion protocol.
+2. **Hard negatives mined from real data** — negative pairs are same-color/same-body different-vehicle confusables (bucketed on the dataset's own labels), because those are the pairs that actually break similarity thresholds. RESULTS.md shows a gallery of the hardest ones.
+3. **Calibration** — isotonic similarity→P(same) fitted on the mined real pairs, with a reliability diagram (predicted vs empirical) and ECE to prove it, and alert thresholds derived from a precision/recall sweep. Every calibration artifact is content-versioned and decisions cite the version they used.
+4. **The ablation** — precision/recall of alerting under (a) raw ReID score alone vs (b) the identity cascade with attribute vetoes and look-alike ambiguity refusal, on identical rankings. The attribute channel uses dataset labels (a perfect classifier), so the measured delta is an upper bound and is labeled as such.
+5. **Cross-camera physics on CityFlow** — the transit-time veto validated against real ground-truth transitions (real hops rarely vetoed; constructed physically-impossible hops caught), and capped-additive corroboration vs noisy-OR on real correlated multi-camera sightings.
+6. **Failure analysis as a feature** — cases where the system narrows to a set of look-alikes and *refuses* to assert an individual, and cases where it errs, each with its plain-English explanation.
 
 ## Architecture
 
 ```
                  (SIMULATED edge tier — asyncio tasks, not hardware)
   ┌────────────┐   ┌────────────┐        ┌────────────┐
-  │ edge node  │   │ edge node  │  ...   │ edge node  │     one per camera
-  │  cam-nw    │   │  cam-n     │        │  cam-s     │
-  │ ──────────
-  │ sim render │   YOLO+ByteTrack (real, with honest fallback)
-  │ OSNet embed│   plate read (controlled noise channel)
-  │ class attrs│   instance attrs (sim-labeled ground truth)
+  │ edge node  │   │ edge node  │  ...   │ edge node  │   one per camera
+  │ detect →   │   │ ByteTrack →│        │ best-crop →│
+  │ OSNet embed│   │ plate read │        │ class attrs│
   └─────┬──────┘   └─────┬──────┘        └─────┬──────┘
-        │  POST /api/sightings  (localhost; a real deployment would put
-        │                        WireGuard/Tailscale here — stubbed, see below)
+        │  POST /api/sightings   (localhost; a real deployment would put a
+        │                         WireGuard/Tailscale mesh here — stubbed)
         ▼
-  ┌─────────────────────────────────────────────────────────┐
-  │ central server (FastAPI + SQLite)                       │
-  │                                                         │
-  │  identity cascade: plate → class attrs → marks → ReID   │
-  │  plausibility vetoes: plate / transit-time / attribute  │
-  │                        contradiction / corroboration    │
-  │  capped-additive corroboration (no noisy-OR)            │
-  │  gated profile updates w/ reversible snapshots          │
-  │  tracker lifecycle: TENTATIVE→CONFIRMED→COASTING→LOST   │
-  │  CV smoother + next-camera prediction                   │
-  └──────────────┬──────────────────────────────────────────┘
-                 │ WebSocket
-                 ▼
-  ┌─────────────────────────────────────────────────────────┐
-  │ operator console (Leaflet + plain JS)                   │
-  │  live map · review queue w/ side-by-side crops and the  │
-  │  plain-English fact list · target dossier · audit trail │
-  └─────────────────────────────────────────────────────────┘
+  ┌──────────────────────────────────────────────────────────────┐
+  │ central server (FastAPI + SQLite audit tables + WebSocket)   │
+  │   identity cascade: plate → class attrs → marks/3D-geometry  │
+  │                     → ReID (tiebreaker only)                 │
+  │   plausibility vetoes: plate / transit-time / attribute      │
+  │   capped-additive corroboration (no noisy-OR)                │
+  │   gated profile updates + gated 3D-model fusion (cargen),    │
+  │     both reversible via snapshots                            │
+  │   tracker: TENTATIVE→CONFIRMED→COASTING→LOST + prediction    │
+  └───────────────┬──────────────────────────────────────────────┘
+                  │ WebSocket
+                  ▼
+  ┌──────────────────────────────────────────────────────────────┐
+  │ operator console: live map · review queue (side-by-side      │
+  │ crops + fact list) · dossier with rotatable 3D model,        │
+  │ green=observed / red=guessed provenance overlay              │
+  └──────────────────────────────────────────────────────────────┘
 ```
 
-## What's real vs. simulated
+## Real vs simulated vs stubbed
 
-**Real (implemented and unit-tested):**
-- The road graph with physical transit-time windows derived from distance and a speed envelope; Dijkstra lower bounds for multi-hop trips (`sim/road_graph.py`).
-- The identity cascade, all four plausibility checks, capped-additive corroboration, the update gate with reversible snapshots, and the tracker lifecycle (`reasoning/`, `tracking/`) — pure logic, ~90 tests.
-- OSNet appearance embeddings computed by the real torchreid model on the actual crop pixels; matching is max-similarity against a bounded per-target gallery.
-- The isotonic calibration pipeline with hard-negative pairs, PR sweep, and versioned artifacts (`calibration/`).
-- The FastAPI server, SQLite audit tables, WebSocket stream, and the console.
+**Real:** the reasoning layer end to end (cascade, all plausibility checks, corroboration math, gates, tracker) — pure logic, unit-tested; OSNet embeddings on actual pixels; the whole eval harness; dataset loaders; the cargen 3D reconstruction/fusion machinery (its own project, ~170 tests).
 
-**Simulated / stubbed (labeled as such in code):**
-- Vehicles are cartoon sprites. Look-alikes render near-identically *by construction* — that is the point, not a shortcut: it guarantees the embedding cannot separate them and the reasoning layer has to.
-- Pretrained COCO YOLO does not recognize the sprites as cars (verified). The detector wrapper runs real YOLO+ByteTrack and falls back to the simulator's box when the model finds nothing; every observation records which path produced it (`detection_source`). On real footage the same code runs without the fallback.
-- Plate "OCR" in the synthetic demo is a controlled error channel (miss rate, confusion-pair substitutions) applied to ground truth, labeled `source="sim"`. A real `fast-plate-ocr` adapter exists for the optional real-clip mode.
-- Instance attributes (damage, stickers, racks) are simulator-labeled ground truth with a miss probability. No real detector backs them.
-- Edge tier = local asyncio tasks. Mesh networking (WireGuard/Tailscale) = the diagram above and localhost sockets. There is no real mesh.
-- OSNet ships with ImageNet weights by default; the VeRi-776 vehicle checkpoint requires a manual download (pass its path to `ReidEmbedder`).
+**Simulated (labeled):** the small synthetic world — used for controlled adversarial fixtures (deterministic correlated look-alikes that prove the independence-trap handling in unit tests) and as the always-runnable demo. Its plate reads and instance attributes are controlled noise channels, and pretrained YOLO cannot see its cartoon sprites, so detection falls back to sim boxes with per-observation provenance labels.
 
-**Cut (roadmap only):** DVR timeline, camera-feed wall, on-device accelerators, drone integration, continuous-learning loops.
+**Stubbed (labeled):** edge tier = local processes; mesh = the diagram above; instance attributes on real data = absent unless a dataset provides them; cargen's default prior backend here is a procedural stub — real 3D quality needs its SF3D/TRELLIS backends (GPU), behind capability checks with graceful CPU fallback.
+
+**Cut (roadmap):** DVR timeline, camera-feed wall, on-device accelerators, drone specifics, training/fine-tuning loops.
 
 ## Design decisions
 
-**Why a cascade instead of one similarity score.** A single fused score lets strong appearance similarity outvote cheap, near-conclusive checks — exactly backwards for look-alike vehicles, which are *designed* to max out appearance similarity. The cascade consults evidence in reliability order (plate → class attributes → distinguishing marks → ReID) and ReID is a **tiebreaker only**: it can rank surviving candidates but can never, by itself, create a match. A candidate with zero symbolic support scores zero regardless of embedding similarity, and any plausibility veto is final — a vehicle cannot cross town faster than the road network allows, no matter how good the crop looks. When a plate matches but physics vetoes, the system flags a plate-clone/clock-skew anomaly for a human instead of picking a side.
+**Cascade over a single score.** A fused similarity score lets appearance outvote near-conclusive cheap checks — backwards for look-alikes, which are selected for maximal appearance similarity. Evidence is consulted in reliability order and ReID is a tiebreaker only: it ranks surviving candidates, it cannot create a match, and any veto is final. A plate match that fails the physics check flags a clone/clock-skew anomaly for a human instead of confirming.
 
-**The independence trap.** The textbook fusion rule for repeated detections, noisy-OR (`1 − Π(1−pᵢ)`), assumes camera errors are independent. For look-alikes they are correlated: if camera A mistakes the sibling Camry for the target, cameras B through D make the same mistake for the same reason. Under noisy-OR, six 60%-confident sightings of the *wrong* car compound to >99% belief. This system fuses additively with diminishing increments and a hard cap on appearance-only credit set *below* the profile-update threshold. Consequence, enforced by test: **no number of appearance-only corroborations can auto-update a target profile.** Crossing that line takes qualitatively independent evidence — a clean plate read or an explicit human confirmation — and every automated update snapshots its before-state so an operator rejection rolls it back losslessly.
+**The independence trap.** Noisy-OR fusion assumes camera errors are independent; for look-alikes every camera makes the *same* error, so noisy-OR compounds correlated weakness into false certainty (measured on real CityFlow chains in RESULTS.md when present). Here, corroboration is additive with diminishing increments and appearance-only credit is hard-capped *below* the profile-update threshold — no number of appearance-only sightings can auto-update a profile; only a plate read or a human can. Updates snapshot their before-state and roll back losslessly.
 
-**Why every decision is explainable.** Each association, veto, cap, and gate decision emits a plain-English fact list (`[+] support / [X] veto / [!] caution / [i] info`) that is stored in the audit tables and rendered verbatim in the review queue. This is not a UI garnish; it is the control surface. An operator shown "appearance similarity 0.95 — tiebreaker only" next to "plate unknown; plate evidence unavailable" makes a different (better) decision than one shown a bare 0.95, and a reviewer can audit weeks later why the system did what it did. If a decision can't articulate its facts, it doesn't happen.
+**One anti-poisoning mechanism, twice.** The same gate guards the 3D model: a sighting's crop fuses into the target's cargen splat asset only on plate- or operator-confirmed events (cargen's pending-approval merge, auto-merge off), with per-splat provenance and pre-fusion snapshots. The dossier renders that provenance — green splats are real evidence, red are generative guesses — so evidence-vs-inference is visible, not asserted.
 
-## Limits — read this part
+**3D geometry where 2D fails.** Cross-view matching is 2D ReID's worst case (front of car A embeds nearer the front of car B than the side of car A). The car3d bridge extracts view-invariant proportion ratios from the fused splat cloud and feeds them to the cascade's attribute tier — support/caution only, never a veto and never the tiebreaker, and withheld entirely until enough of the cloud is observed rather than guessed. Whether this actually buys cross-view precision is an open ablation, reported once real data + a real prior backend are in place.
 
-- **Look-alikes identify a set, not an individual.** When several vehicles share class attributes and carry no distinguishing marks, appearance evidence narrows candidates to that set and stops. The system is built to *refuse* to guess past that point (ambiguous matches go to review), which also means it cannot do what a single-score system falsely claims to do.
-- **The calibration measures the simulator.** The isotonic map and PR sweep are computed on rendered sprite pairs. They say nothing about real-world ReID accuracy, and no accuracy claims of any kind are made here.
-- **The perception stage is glue, partly bypassed.** YOLO mostly falls back on cartoon frames (recorded honestly per observation), plate reads are a noise model, and instance attributes are simulator labels. The end-to-end demo demonstrates the reasoning layer, not a perception benchmark.
-- The simulator and the transit veto share the same physics constants, so the veto is exercised, not adversarially validated.
+**Explainability as the control surface.** Every decision emits a plain-English fact list, persisted in the audit tables and shown verbatim in the review queue. Operators act on reasons, not scores; reviewers can reconstruct any decision later.
 
-## Legal / ethical envelope
+## Limits — honest ones
 
-The same pipeline is an investigative tool or an instrument of mass surveillance depending entirely on things outside the code: who may flag a target and under what authority, how long data is retained, who audits the decisions, and whether the people observed have any say. Technical properties here — explainable decisions, human gates on weak evidence, reversible updates, audit trails — are necessary but nowhere near sufficient safeguards. This project is a synthetic demonstrator built to understand, and critique, how such systems reason; it must not be pointed at real people, and it never touches real data.
+- **Look-alikes identify a set, not an individual.** With shared class attributes and no distinguishing marks, appearance evidence stops at the set; the system refuses to guess past it (ambiguity → review). Anything claiming otherwise on appearance alone is overfitting or lying.
+- **Calibration is per-distribution and goes stale.** The isotonic map is only meaningful for the camera/vehicle distribution it was fitted on; artifacts are versioned for exactly that reason. No production-accuracy claim is made anywhere.
+- **The ablation's attribute channel uses ground-truth labels** — its delta is an upper bound on a real attribute head.
+- **Single-crop 3D is rough by construction.** Traffic crops are terrible image-to-3D input (small, off-center, one view); model quality is bought with multiple confirmed sightings, and the stub prior's geometry means nothing at all — which is why geometry attrs gate on observed-fraction.
+- The synthetic transit veto shares constants with its simulator; only the CityFlow validation tests it against reality.
 
-## Repo layout
+## Explainability vs ethics
+
+Per-decision explanations improve auditability and contestability — a real gap in deployed systems, and the specific thing critics correctly say ALPR networks lack. But explainability is necessary, not sufficient: consent, aggregation harm (many innocuous sightings compose into a movement profile), mission creep, retention, and independent oversight are structural properties of a deployment, not code. A perfectly explainable system can still be a mass-surveillance instrument. This project is a synthetic-plus-public-data demonstrator built to understand and critique these systems, not to operate them.
+
+## Layout
 
 ```
-sim/          synthetic world: graph, fleet, routes, emitter, sprite renderer
-perception/   detector glue, OSNet embedder, plate channels, attributes
-reasoning/    facts, profiles, plausibility checks, cascade, corroboration, gates
-tracking/     lifecycle, smoother, next-camera prediction, FleetTracker
-server/       FastAPI app, SQLite models, WS fan-out, simulated edge feed
-web/          operator console (Leaflet + plain JS, no build step)
-calibration/  pair dataset, isotonic fit, PR sweep, versioned artifacts
-tests/        pytest suites (~130 tests; -m "not slow" skips model loads)
+datasets/     presence-gated loaders (VeRi-776, VehicleID, CityFlow)
+eval/         retrieval metrics, hard-negative mining, reliability, ablation,
+              cross-camera validation, RESULTS.md generator
+sim/          synthetic world (fixtures + fallback demo)
+perception/   detector glue, OSNet embedder, plate/attr channels
+reasoning/    facts, profiles, plausibility, cascade, corroboration, gates
+tracking/     lifecycle, smoother, prediction, FleetTracker
+car3d/        cargen bridge: geometry attrs, gated 3D profile, renders
+server/       FastAPI, SQLite, WebSocket, simulated edge feed
+web/          operator console (Leaflet + plain JS)
+calibration/  isotonic fit + versioned artifacts
+tests/        pytest suites
 ```
