@@ -10,6 +10,48 @@
   border-right: 1px solid var(--line); padding: 12px; display: flex;
   flex-direction: column; gap: 16px;
 }
+#inspector-main {
+  flex: 1; display: flex; flex-direction: column; min-width: 0; overflow: hidden;
+}
+
+#stage {
+  display: flex; gap: 10px; padding: 10px; height: 300px; flex-shrink: 0;
+  background: var(--panel); border-bottom: 1px solid var(--line);
+}
+#stage-cameras {
+  flex: 1.05; display: flex; flex-direction: column; gap: 8px; min-width: 0;
+}
+.cam-tile {
+  flex: 1; min-height: 0; background: #0c1116; border: 1px solid var(--line);
+  border-radius: 6px; padding: 6px; display: flex; flex-direction: column;
+  position: relative; transition: box-shadow .2s;
+}
+.cam-tile-label {
+  font-size: 10px; color: var(--dim); text-transform: uppercase;
+  letter-spacing: .05em; margin-bottom: 4px; display: flex; justify-content: space-between;
+}
+.cam-tile img {
+  flex: 1; width: 100%; min-height: 0; object-fit: contain; border-radius: 3px;
+  image-rendering: pixelated; background: #05070a;
+}
+.cam-tile .hint { flex: 1; display: flex; align-items: center; text-align: center;
+  padding: 8px; }
+
+#stage-map-wrap { flex: 1; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+#stage-map {
+  flex: 1; border-radius: 6px; overflow: hidden; border: 1px solid var(--line);
+  background: #0c1116;
+}
+.stage-legend {
+  display: flex; gap: 12px; flex-wrap: wrap; font-size: 10px; color: var(--dim);
+  align-items: center;
+}
+.stage-legend i {
+  display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+  margin-right: 4px; vertical-align: middle;
+}
+.stage-legend .stage-caption { color: var(--dim); font-style: italic; }
+
 #inspector-results {
   flex: 1; overflow-y: auto; padding: 16px; display: flex;
   flex-direction: column; gap: 12px;

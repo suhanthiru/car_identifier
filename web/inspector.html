@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <title>Eyes Everywhere — reasoning inspector</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <link rel="stylesheet" href="style.css">
 <link rel="stylesheet" href="inspector.css">
 </head>
@@ -73,12 +74,42 @@
     <button id="evaluate" class="primary">Evaluate</button>
   </aside>
 
-  <main id="inspector-results">
-    <div id="results-empty" class="hint">Build a sighting and at least one target,
-      then Evaluate. Or click a preset above.</div>
-    <div id="results"></div>
+  <main id="inspector-main">
+    <div id="stage">
+      <div id="stage-cameras">
+        <div class="cam-tile" id="cam-tile-sighting">
+          <div class="cam-tile-label">
+            <span>This sighting <span id="cam-sighting-id" class="pill">—</span></span>
+          </div>
+          <img id="cam-sighting-img" alt="synthetic render of the sighting's camera view">
+        </div>
+        <div class="cam-tile" id="cam-tile-lastseen">
+          <div class="cam-tile-label">
+            <span>Target's last confirmed view <span id="cam-lastseen-id" class="pill">—</span></span>
+          </div>
+          <img id="cam-lastseen-img" class="hidden" alt="synthetic render of the target's last sighting">
+          <div id="cam-lastseen-empty" class="hint">No single reference — set exactly
+            one target's last-seen camera to preview it here.</div>
+        </div>
+      </div>
+      <div id="stage-map-wrap">
+        <div id="stage-map"></div>
+        <div class="stage-legend">
+          <span><i style="background:#4da3ff"></i> sighting camera</span>
+          <span><i style="background:#e0a83c"></i> target's last-seen camera</span>
+          <span class="stage-caption">renders are synthetic; the map is built
+            automatically from the same camera graph the cascade reasons over</span>
+        </div>
+      </div>
+    </div>
+    <div id="inspector-results">
+      <div id="results-empty" class="hint">Build a sighting and at least one target,
+        then Evaluate. Or click a preset above.</div>
+      <div id="results"></div>
+    </div>
   </main>
 </div>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="inspector.js"></script>
 </body>
 </html>
