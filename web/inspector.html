@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Eyes Everywhere — reasoning inspector</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="inspector.css">
+</head>
+<body class="inspector-body">
+<div id="banner">
+  SANDBOX — nothing on this page is saved, tracked, or audited. It runs the real
+  reasoning cascade on inputs you build by hand, so you can see exactly what it
+  concludes and why. <a href="index.html">&larr; back to the live console</a>
+</div>
+<div id="inspector-layout">
+  <aside id="inspector-form">
+    <section>
+      <h2>Presets</h2>
+      <div class="preset-row">
+        <button class="preset" data-preset="plate">Plate match</button>
+        <button class="preset" data-preset="transit">Impossible transit</button>
+        <button class="preset" data-preset="refusal">Look-alike refusal</button>
+        <button class="preset" data-preset="ambiguous">Ambiguous pair</button>
+      </div>
+    </section>
+
+    <section>
+      <h2>The sighting</h2>
+      <div class="field-grid">
+        <label>Camera
+          <select id="s-camera"></select>
+        </label>
+        <label>Timestamp (s)
+          <input id="s-time" type="number" value="1000" step="1">
+        </label>
+      </div>
+      <div class="field-grid">
+        <label>Plate read (blank = none)
+          <input id="s-plate" placeholder="e.g. ABC-1234">
+        </label>
+        <label>Plate reader confidence
+          <input id="s-plate-conf" type="number" min="0" max="1" step="0.01" value="0.9">
+        </label>
+      </div>
+      <div class="field-grid four">
+        <label>Make <input id="s-make" value="Toyota"></label>
+        <label>Model <input id="s-model" value="Camry"></label>
+        <label>Body <input id="s-body" value="sedan"></label>
+        <label>Color <input id="s-color" value="silver"></label>
+      </div>
+      <label>Instance attrs (mark:value, one per line)
+        <textarea id="s-marks" rows="2" placeholder="accessory: roof rack"></textarea>
+      </label>
+    </section>
+
+    <section>
+      <h2>Distinctiveness floor <span id="floor-value" class="pill">0.30</span></h2>
+      <input id="floor-slider" type="range" min="0" max="1" step="0.01" value="0.30">
+      <p class="hint">Below this, the cascade refuses to name an individual and
+        returns a candidate set instead. This is the real production default —
+        drag it to see the effect on the same evidence.</p>
+    </section>
+
+    <section>
+      <div class="section-head">
+        <h2>Target profiles</h2>
+        <button id="add-target" type="button">+ add target</button>
+      </div>
+      <div id="targets-form"></div>
+    </section>
+
+    <button id="evaluate" class="primary">Evaluate</button>
+  </aside>
+
+  <main id="inspector-results">
+    <div id="results-empty" class="hint">Build a sighting and at least one target,
+      then Evaluate. Or click a preset above.</div>
+    <div id="results"></div>
+  </main>
+</div>
+<script src="inspector.js"></script>
+</body>
+</html>
