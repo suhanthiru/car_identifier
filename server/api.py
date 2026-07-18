@@ -51,15 +51,28 @@ def create_app(
     calibration_path: str = "calibration/artifacts/latest.json",
     enable_3d: bool | None = None,
     targets3d_dir: str = "data/targets3d",
+    world_source: str = "synthetic",
 ) -> FastAPI:
     """enable_3d: build/maintain a cargen 3D model per target, fusing crops
     only on gated (plate/operator-confirmed) updates. Off by default: the
     CPU reconstruction adds seconds per confirmed sighting. Env override:
-    EYES_ENABLE_3D=1."""
+    EYES_ENABLE_3D=1.
+
+    world_source: "synthetic" (default, our fictional Gridville graph) or
+    "real" (a graph built from an actual dataset's real camera GPS, e.g.
+    CityFlowScenario.to_road_graph()). Purely descriptive — it changes
+    nothing about how the graph is used server-side — but the console and
+    inspector read it via GET /api/world_source to decide whether their map
+    draws our own fabricated road network or a real basemap tile layer
+    under the (real) camera positions. Never mix the two: a "real" graph
+    with fabricated street-name labels drawn on top would misrepresent
+    fiction as fact."""
     import os
 
     if enable_3d is None:
         enable_3d = os.environ.get("EYES_ENABLE_3D", "0") == "1"
+    if world_source not in ("synthetic", "real"):
+        raise ValueError(f"world_source must be 'synthetic' or 'real', got {world_source!r}")
     graph = graph or default_world()
     cascade_config = None
     if calibration_path and Path(calibration_path).is_file():
@@ -92,6 +105,7 @@ def create_app(
     state.target_seq = itertools.count(1)
     state.enable_3d = enable_3d
     state.targets3d_dir = Path(targets3d_dir)
+    state.world_source = world_source
     state.render_embedder = None       # lazy ReidEmbedder for render-and-compare
     _rc_path = Path("car3d/artifacts/render_compare.json")
     state.render_calibrator = None
@@ -488,6 +502,15 @@ def create_app(
     @app.get("/api/adjacency")
     def camera_adjacency():
         return [dataclasses.asdict(e) for e in graph.edges]
+
+    @app.get("/api/world_source")
+    def world_source_info():
+        """Tells the frontend whether the camera graph is our fictional
+        Gridville world or built from a real dataset's real GPS — the map
+        uses this to decide whether to draw its own road network or a real
+        basemap tile layer under the camera pins. See create_app's
+        world_source docstring for why these must never be mixed."""
+        return {"source": state.world_source}
 
     # ---------------------------------------------------------- inspector
 
