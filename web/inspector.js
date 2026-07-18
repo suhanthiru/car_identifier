@@ -60,6 +60,143 @@ function cameraOptionsHtml(selected) {
   return none + opts;
 }
 
+/* ------------------------------------------------------------------ stage
+   The centerpiece: two live camera-feed tiles (synthetic renders, updated
+   on every relevant form change — this is the "auto-switch" the map/feed
+   does as the sighting or the reference target's camera changes) and a
+   Leaflet map built automatically from /api/cameras + /api/adjacency, the
+   same graph the reasoning cascade's transit veto reasons over. */
+
+const VERDICT_HEX = {
+  confirmed: "#3ddc84", likely: "#4da3ff", candidate: "#e0a83c",
+  rejected: "#ff5d5d", undecided: "#77808c",
+};
+
+let stageMap = null;
+let cameraMarkers = {};
+let stageRouteLines = [];
+
+async function initStageMap() {
+  stageMap = L.map("stage-map", { zoomControl: false, attributionControl: false });
+  const byId = {};
+  CAMERAS.forEach((c) => { byId[c.camera_id] = c; });
+  let adjacency = [];
+  try { adjacency = await api("/api/adjacency"); } catch (e) { /* map still shows nodes */ }
+  const seen = new Set();
+  adjacency.forEach((e) => {
+    const key = [e.src, e.dst].sort().join("|");
+    if (seen.has(key)) return;
+    seen.add(key);
+    if (!byId[e.src] || !byId[e.dst]) return;
+    L.polyline([[byId[e.src].lat, byId[e.src].lon], [byId[e.dst].lat, byId[e.dst].lon]],
+      { color: "#243247", weight: 2, interactive: false }).addTo(stageMap);
+  });
+  CAMERAS.forEach((c) => {
+    cameraMarkers[c.camera_id] = L.circleMarker([c.lat, c.lon], {
+      radius: 6, color: "#3d5271", weight: 2, fillColor: "#16202e", fillOpacity: 1,
+    }).addTo(stageMap).bindTooltip(`${c.name} (${c.camera_id})`, {
+      direction: "top", offset: [0, -6] });
+  });
+  if (CAMERAS.length) {
+    stageMap.fitBounds(CAMERAS.map((c) => [c.lat, c.lon]), { padding: [22, 22] });
+  }
+}
+
+function resetMapHighlights() {
+  Object.values(cameraMarkers).forEach((m) =>
+    m.setStyle({ color: "#3d5271", radius: 6, fillColor: "#16202e" }));
+  stageRouteLines.forEach((l) => stageMap.removeLayer(l));
+  stageRouteLines = [];
+}
+
+function highlightMapCameras(sightingCam, lastSeenCam, edgeColorHex) {
+  if (!stageMap) return;
+  resetMapHighlights();
+  if (sightingCam && cameraMarkers[sightingCam]) {
+    cameraMarkers[sightingCam].setStyle({ color: "#4da3ff", radius: 9, fillColor: "#4da3ff" });
+  }
+  if (lastSeenCam && cameraMarkers[lastSeenCam]) {
+    cameraMarkers[lastSeenCam].setStyle({ color: "#e0a83c", radius: 9, fillColor: "#e0a83c" });
+  }
+  if (sightingCam && lastSeenCam && sightingCam !== lastSeenCam
+      && cameraMarkers[sightingCam] && cameraMarkers[lastSeenCam]) {
+    const a = CAMERAS.find((c) => c.camera_id === lastSeenCam);
+    const b = CAMERAS.find((c) => c.camera_id === sightingCam);
+    if (a && b) {
+      const line = L.polyline([[a.lat, a.lon], [b.lat, b.lon]], {
+        color: edgeColorHex || "#4da3ff", weight: 4, opacity: 0.85,
+        dashArray: edgeColorHex ? null : "4 6",
+      }).addTo(stageMap);
+      stageRouteLines.push(line);
+    }
+  }
+}
+
+function renderUrl(cameraId, timestampS, attrs) {
+  const payload = encodeURIComponent(JSON.stringify(attrs));
+  return `/api/inspect/render?camera_id=${encodeURIComponent(cameraId)}` +
+    `&timestamp_s=${encodeURIComponent(timestampS)}&payload=${payload}`;
+}
+
+function updateSightingFeed() {
+  const camId = document.getElementById("s-camera").value;
+  document.getElementById("cam-sighting-id").textContent = camId || "—";
+  const img = document.getElementById("cam-sighting-img");
+  if (!camId) { img.removeAttribute("src"); return; }
+  img.src = renderUrl(camId, document.getElementById("s-time").value || "0", {
+    plate: document.getElementById("s-plate").value.trim(),
+    make: document.getElementById("s-make").value.trim(),
+    model: document.getElementById("s-model").value.trim(),
+    body_type: document.getElementById("s-body").value.trim(),
+    color: document.getElementById("s-color").value.trim(),
+    instance_attrs: parseMarks(document.getElementById("s-marks").value),
+  });
+}
+
+/* Only unambiguous with exactly one target on the form — with several
+   targets in play there is no single "the" reference view to show. */
+function soleTargetForm() {
+  const forms = [...document.querySelectorAll(".target-form")];
+  return forms.length === 1 ? forms[0] : null;
+}
+
+function updateLastSeenFeed() {
+  const div = soleTargetForm();
+  const camId = div ? div.querySelector(".t-last-camera").value : "";
+  const img = document.getElementById("cam-lastseen-img");
+  const empty = document.getElementById("cam-lastseen-empty");
+  document.getElementById("cam-lastseen-id").textContent = camId || "—";
+  if (!div || !camId) {
+    img.classList.add("hidden");
+    empty.classList.remove("hidden");
+    empty.textContent = !div
+      ? "No single reference — set exactly one target's last-seen camera to preview it here."
+      : "This target has no last-seen camera set (a fresh flag with no confirmed sighting yet).";
+    return;
+  }
+  img.src = renderUrl(camId, div.querySelector(".t-last-time").value || "0", {
+    plate: div.querySelector(".t-plate").value.trim(),
+    make: div.querySelector(".t-make").value.trim(),
+    model: div.querySelector(".t-model").value.trim(),
+    body_type: div.querySelector(".t-body").value.trim(),
+    color: div.querySelector(".t-color").value.trim(),
+    instance_attrs: parseMarks(div.querySelector(".t-marks").value),
+  });
+  img.classList.remove("hidden");
+  empty.classList.add("hidden");
+}
+
+function updateStage(verdictHex) {
+  updateSightingFeed();
+  updateLastSeenFeed();
+  const sightingCam = document.getElementById("s-camera").value;
+  const div = soleTargetForm();
+  const lastCam = div ? div.querySelector(".t-last-camera").value : "";
+  highlightMapCameras(sightingCam, lastCam, verdictHex || null);
+  document.getElementById("cam-tile-sighting").style.boxShadow =
+    verdictHex ? `0 0 0 2px ${verdictHex}` : "none";
+}
+
 /* --------------------------------------------------------- target forms */
 
 function addTargetForm(preset) {
@@ -107,19 +244,21 @@ function addTargetForm(preset) {
              value="${reidVal}" ${hasGallery ? "" : "disabled"}>
       <span class="reid-value">${reidVal.toFixed(2)}</span>
     </div>`;
-  div.querySelector(".remove-target").onclick = () => div.remove();
+  div.querySelector(".remove-target").onclick = () => { div.remove(); updateStage(); };
   const toggle = div.querySelector(".t-has-gallery");
   const slider = div.querySelector(".t-reid");
   const val = div.querySelector(".reid-value");
   toggle.onchange = () => { slider.disabled = !toggle.checked; };
   slider.oninput = () => { val.textContent = parseFloat(slider.value).toFixed(2); };
   document.getElementById("targets-form").appendChild(div);
+  updateStage();
   return div;
 }
 
 function clearTargets() {
   document.getElementById("targets-form").innerHTML = "";
   targetCounter = 0;
+  updateStage();
 }
 
 function collectTargets() {
@@ -255,6 +394,7 @@ async function evaluate() {
       ? `<div class="margin-note">margin between top two candidates: ${result.margin.toFixed(3)}</div>` : "";
     resultsEl.innerHTML = marginNote +
       result.all_decisions.map((d) => decisionCardHtml(d, d.target_id === result.best.target_id, floor)).join("");
+    updateStage(VERDICT_HEX[result.best.verdict] || null);
   } catch (e) {
     // A render bug must be visible, not a silently stale panel from the
     // previous evaluation — that's worse than no answer at all here.
@@ -303,16 +443,7 @@ const PRESETS = {
 function applyPreset(name) {
   const p = PRESETS[name];
   if (!p) return;
-  const s = p.sighting;
-  document.getElementById("s-camera").value = s.camera || CAMERAS[0]?.camera_id || "";
-  document.getElementById("s-time").value = s.time;
-  document.getElementById("s-plate").value = s.plate;
-  document.getElementById("s-plate-conf").value = s.plateConf;
-  document.getElementById("s-make").value = s.make;
-  document.getElementById("s-model").value = s.model;
-  document.getElementById("s-body").value = s.body;
-  document.getElementById("s-color").value = s.color;
-  document.getElementById("s-marks").value = s.marks;
+  applyPresetSighting(p.sighting);
   clearTargets();
   p.targets.forEach((t) => addTargetForm(t));
   evaluate();
@@ -324,12 +455,38 @@ document.getElementById("evaluate").onclick = evaluate;
 document.getElementById("add-target").onclick = () => addTargetForm();
 document.getElementById("floor-slider").oninput = (e) => {
   document.getElementById("floor-value").textContent = parseFloat(e.target.value).toFixed(2);
+  updateStage();
 };
 document.querySelectorAll(".preset").forEach((btn) => {
   btn.onclick = () => applyPreset(btn.dataset.preset);
 });
 
-loadCameras().then(() => {
+// Sighting fields drive the sighting camera tile live — this is the
+// "auto-switch" behavior: change the camera or attrs and the render updates
+// immediately, no Evaluate click needed.
+["s-camera", "s-time", "s-plate", "s-make", "s-model", "s-body", "s-color", "s-marks"]
+  .forEach((id) => {
+    const el = document.getElementById(id);
+    el.addEventListener(el.tagName === "SELECT" ? "change" : "input", () => updateStage());
+  });
+// Target forms are dynamic; delegate so newly-added targets are covered too.
+document.getElementById("targets-form").addEventListener("input", () => updateStage());
+document.getElementById("targets-form").addEventListener("change", () => updateStage());
+
+function applyPresetSighting(s) {
+  document.getElementById("s-camera").value = s.camera || CAMERAS[0]?.camera_id || "";
+  document.getElementById("s-time").value = s.time;
+  document.getElementById("s-plate").value = s.plate;
+  document.getElementById("s-plate-conf").value = s.plateConf;
+  document.getElementById("s-make").value = s.make;
+  document.getElementById("s-model").value = s.model;
+  document.getElementById("s-body").value = s.body;
+  document.getElementById("s-color").value = s.color;
+  document.getElementById("s-marks").value = s.marks;
+}
+
+loadCameras().then(async () => {
+  await initStageMap();
   addTargetForm({ label: "Test target", plate: "ABC-1234",
                   make: "Toyota", model: "Camry", body: "sedan", color: "silver" });
 });
