@@ -23,7 +23,7 @@ from pathlib import Path
 
 import numpy as np
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from sqlmodel import Session, select
 
@@ -587,6 +587,52 @@ def create_app(
             "margin": round(ranked.margin, 4),
             "all_decisions": all_decisions,
         }
+
+    @app.get("/api/inspect/render")
+    def inspect_render(camera_id: str, timestamp_s: float = 0.0, payload: str = "{}"):
+        """A SYNTHETIC camera frame standing in for the sandbox's sighting or
+        a target's last-confirmed view — the inspector's visual centerpiece.
+
+        Nothing here is a real camera feed: it's the same procedural sprite
+        renderer the sim uses, driven by whatever attrs are in the form right
+        now, so the panel updates live as the operator edits them. Swapping
+        this for real per-camera frames (once a real dataset is wired into a
+        live inspector) is a natural extension, not a redesign — the frontend
+        only cares that this URL returns a PNG for a given camera+attrs.
+        """
+        import json
+
+        import cv2
+
+        from sim.model import VehicleIdentity
+        from sim.render import COLOR_BGR, render_frame
+
+        if camera_id not in graph.camera_ids():
+            raise HTTPException(422, f"unknown camera id: {camera_id}")
+        try:
+            data = json.loads(payload)
+        except json.JSONDecodeError:
+            raise HTTPException(422, "payload must be valid JSON")
+        if not isinstance(data, dict):
+            raise HTTPException(422, "payload must be a JSON object")
+
+        color = str(data.get("color") or "").lower()
+        if color not in COLOR_BGR:
+            color = "gray"  # renderer only knows a fixed palette; fall back honestly
+        vehicle = VehicleIdentity(
+            vehicle_id="sandbox",
+            plate=str(data.get("plate") or "SANDBOX"),
+            make=str(data.get("make") or "Unknown"),
+            model=str(data.get("model") or "Vehicle"),
+            body_type=str(data.get("body_type") or "sedan"),
+            color=color,
+            instance_attrs={str(k): str(v) for k, v in (data.get("instance_attrs") or {}).items()},
+        )
+        frame = render_frame(vehicle, graph.camera(camera_id), timestamp_s)
+        ok, png = cv2.imencode(".png", frame)
+        if not ok:
+            raise HTTPException(500, "render failed")
+        return Response(content=png.tobytes(), media_type="image/png")
 
     @app.get("/api/targets/{target_id}/model3d")
     def target_model3d(target_id: str):
