@@ -42,27 +42,11 @@ function fmtTime(t) { return `t+${Math.round(t)}s`; }
 /* ------------------------------------------------------------------- map */
 
 async function initMap() {
-  const cameras = await api("/api/cameras");
-  const adjacency = await api("/api/adjacency");
-  const byId = {};
-  cameras.forEach((c) => { byId[c.camera_id] = c; });
-
-  const seen = new Set();
-  adjacency.forEach((e) => {
-    const key = [e.src, e.dst].sort().join("|");
-    if (seen.has(key)) return;
-    seen.add(key);
-    L.polyline(
-      [[byId[e.src].lat, byId[e.src].lon], [byId[e.dst].lat, byId[e.dst].lon]],
-      { color: "#243247", weight: 2, interactive: false }).addTo(map);
-  });
-  cameras.forEach((c) => {
-    cameraMarkers[c.camera_id] = L.circleMarker([c.lat, c.lon], {
-      radius: 7, color: "#3d5271", weight: 2, fillColor: "#16202e", fillOpacity: 1,
-    }).addTo(map).bindTooltip(c.name, {
-      permanent: true, direction: "bottom", offset: [0, 8], className: "cam-label",
-    });
-  });
+  const [cameras, adjacency, worldSource] = await Promise.all([
+    api("/api/cameras"), api("/api/adjacency"),
+    api("/api/world_source").catch(() => ({ source: "synthetic" })),
+  ]);
+  cameraMarkers = renderRoadMap(map, cameras, adjacency, worldSource.source).cameraMarkers;
   map.fitBounds(cameras.map((c) => [c.lat, c.lon]), { padding: [46, 46] });
 }
 

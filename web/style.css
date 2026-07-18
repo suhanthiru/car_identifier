@@ -148,3 +148,26 @@ section h2 {
   color: var(--dim); font-size: 10px; font-weight: 600;
 }
 .leaflet-tooltip.cam-label::before { display: none; }
+
+/* Stylized synthetic road map (web/roadmap.js) — not a real basemap, see
+   that file's header. Subtle gradient reads as "a place" instead of void. */
+.leaflet-container {
+  background: radial-gradient(ellipse at center, #121820 0%, #090c10 100%);
+}
+.street-label {
+  background: none !important; border: none !important; box-shadow: none !important;
+  color: #63738a; font-size: 9px; font-weight: 600; letter-spacing: .02em;
+  text-shadow: 0 0 3px #0a0e13, 0 0 4px #0a0e13, 0 0 4px #0a0e13;
+  white-space: nowrap; pointer-events: none;
+}
+.leaflet-tooltip.street-label::before { display: none; }
+.traffic-light-icon { background: none; border: none; }
+.tl-body {
+  width: 6px; height: 14px; background: #0c1116; border: 1px solid #2a3546;
+  border-radius: 2px; display: flex; flex-direction: column; align-items: center;
+  justify-content: space-between; padding: 1.5px 0;
+}
+.tl-body i { width: 2.5px; height: 2.5px; border-radius: 50%; display: block; }
+.tl-r { background: #5a2a2a; }
+.tl-y { background: #5a4a1a; }
+.tl-g { background: #1a4a2a; }
