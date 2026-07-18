@@ -55,3 +55,40 @@ class ProfileEditRequest(BaseModel):
     plate: str | None = None
     class_attrs: dict[str, str] | None = None
     instance_attrs: dict[str, str] | None = None
+
+
+class InspectTargetIn(BaseModel):
+    """One hand-built target profile for the reasoning sandbox."""
+
+    target_id: str = Field(default="sandbox-target", min_length=1, max_length=40)
+    label: str = "Test target"
+    plate: str = ""
+    class_attrs: dict[str, str] = {}
+    instance_attrs: dict[str, str] = {}
+    last_seen_camera_id: str = ""
+    last_seen_timestamp_s: float | None = None
+    # Simulated ReID similarity to the sighting below, in [-1, 1]. None = the
+    # target has no appearance gallery yet, so ReID is unavailable (matches
+    # a freshly-flagged, never-confirmed target).
+    reid_similarity: float | None = Field(default=None, ge=-1.0, le=1.0)
+
+
+class InspectSightingIn(BaseModel):
+    """One hand-built sighting for the reasoning sandbox."""
+
+    camera_id: str = Field(min_length=1)
+    timestamp_s: float
+    plate_text: str = ""
+    plate_confidence: float = Field(default=0.9, ge=0.0, le=1.0)
+    class_attrs: dict[str, str] = {}
+    instance_attrs: dict[str, str] = {}
+
+
+class InspectRequest(BaseModel):
+    """Reasoning-sandbox request: no DB, no tracker, no audit trail — just
+    the cascade run on inputs a human constructed by hand. Up to 4 targets
+    lets the ambiguity / candidate-set behavior be exercised directly."""
+
+    sighting: InspectSightingIn
+    targets: list[InspectTargetIn] = Field(min_length=1, max_length=4)
+    distinctiveness_floor: float | None = Field(default=None, ge=0.0, le=1.0)

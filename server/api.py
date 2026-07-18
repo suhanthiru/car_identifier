@@ -34,7 +34,8 @@ from perception.types import Observation, PlateRead
 from reasoning.profile import profile_from_flag
 from server import db as dbm
 from server.schemas import (
-    FlagTargetRequest, ProfileEditRequest, ReviewResolution, SightingReport,
+    FlagTargetRequest, InspectRequest, ProfileEditRequest, ReviewResolution,
+    SightingReport,
 )
 from server.ws import ConnectionManager
 from sim.road_graph import RoadGraph, default_world
@@ -91,6 +92,20 @@ def create_app(
     state.target_seq = itertools.count(1)
     state.enable_3d = enable_3d
     state.targets3d_dir = Path(targets3d_dir)
+    state.render_embedder = None       # lazy ReidEmbedder for render-and-compare
+    _rc_path = Path("car3d/artifacts/render_compare.json")
+    state.render_calibrator = None
+    if _rc_path.is_file():
+        from car3d.calibration import load_model as _load_rc
+        state.render_calibrator = _load_rc(_rc_path)
+
+    def _embed_bgr(bgr):
+        if state.render_embedder is None:
+            from perception.embedder import ReidEmbedder
+            state.render_embedder = ReidEmbedder()
+        return state.render_embedder.embed(bgr)
+
+    state.embed_bgr = _embed_bgr
 
     # Rehydrate flagged targets from a pre-existing DB so a server restart
     # neither collides on target ids nor forgets what was flagged. Live
@@ -473,6 +488,105 @@ def create_app(
     @app.get("/api/adjacency")
     def camera_adjacency():
         return [dataclasses.asdict(e) for e in graph.edges]
+
+    # ---------------------------------------------------------- inspector
+
+    @app.post("/api/inspect/evaluate")
+    def inspect_evaluate(req: InspectRequest):
+        """Reasoning sandbox: run the real cascade on hand-built inputs.
+
+        No tracker, no DB write, no audit entry — this is a "what would the
+        system conclude" tool, not a live sighting. It exists so a human can
+        see the fact list, structured signals, distinctiveness score, and
+        counterfactuals for ANY hypothetical scenario, not just ones that
+        happen to occur during a sim run. ReID similarity is simulated
+        directly (a slider, not a real image) via a pair of synthetic unit
+        vectors constructed to have exactly the requested cosine similarity.
+        """
+        from reasoning.cascade import CascadeConfig, rank_candidates
+        from reasoning.profile import LastSeen, TargetProfile
+
+        known = set(graph.camera_ids())
+        bad_cams = {req.sighting.camera_id} - known
+        for t in req.targets:
+            if t.last_seen_camera_id:
+                bad_cams |= {t.last_seen_camera_id} - known
+        if bad_cams:
+            raise HTTPException(422, f"unknown camera id(s): {sorted(bad_cams)}")
+
+        # A fixed basis vector for the sighting; each target's synthetic
+        # gallery vector is placed so its cosine similarity to this one
+        # equals exactly the requested reid_similarity (or omitted -> no
+        # gallery -> ReID unavailable for that target, same as a
+        # never-confirmed profile).
+        dim = 8
+        obs_emb = np.zeros(dim, dtype=np.float32)
+        obs_emb[0] = 1.0
+        plate = (PlateRead(req.sighting.plate_text.upper(), req.sighting.plate_confidence,
+                           "sim") if req.sighting.plate_text else None)
+        obs = Observation(
+            event_id="sandbox", camera_id=req.sighting.camera_id,
+            timestamp_s=req.sighting.timestamp_s, lat=0.0, lon=0.0,
+            embedding=obs_emb, plate=plate,
+            class_attrs=dict(req.sighting.class_attrs), class_attrs_source="sandbox",
+            instance_attrs=dict(req.sighting.instance_attrs), detection_source="sandbox",
+        )
+
+        labels: dict[str, str] = {}
+        profiles = []
+        for t in req.targets:
+            last_seen = (
+                LastSeen(t.last_seen_camera_id, t.last_seen_timestamp_s, "sandbox-last-seen")
+                if t.last_seen_camera_id and t.last_seen_timestamp_s is not None else None)
+            gallery = ()
+            if t.reid_similarity is not None:
+                s = max(-1.0, min(1.0, t.reid_similarity))
+                vec = np.zeros(dim, dtype=np.float32)
+                vec[0], vec[1] = s, float(np.sqrt(max(0.0, 1.0 - s * s)))
+                gallery = (vec,)
+            profiles.append(TargetProfile(
+                target_id=t.target_id, label=t.label, plate=t.plate.upper().strip(),
+                class_attrs=dict(t.class_attrs), instance_attrs=dict(t.instance_attrs),
+                gallery=gallery, last_seen=last_seen,
+            ))
+            labels[t.target_id] = t.label
+
+        cfg = CascadeConfig(distinctiveness_floor=req.distinctiveness_floor) \
+            if req.distinctiveness_floor is not None else CascadeConfig()
+        ranked = rank_candidates(obs, profiles, graph, cfg)
+
+        def decision_json(d):
+            return {
+                "target_id": d.target_id, "label": labels.get(d.target_id, d.target_id),
+                "verdict": d.verdict, "score": round(d.score, 4),
+                "deciding_tier": d.deciding_tier,
+                "distinctiveness": round(d.distinctiveness, 4),
+                "refused_to_individuate": d.refused_to_individuate,
+                # Always present (possibly empty) so clients never branch on
+                # its absence — only ranked.best carries the real candidate
+                # set today, but every decision serializes the same shape.
+                "candidate_ids": list(d.candidate_ids),
+                "requires_review": d.requires_review, "anomaly": d.anomaly,
+                "reid_similarity": round(d.reid_similarity, 4),
+                "facts": [{"kind": f.kind, "text": f.text, "check": f.check}
+                         for f in d.facts],
+                "counterfactuals": [
+                    {"signal": c.signal, "current_outcome": c.current_outcome,
+                     "flipped_outcome": c.flipped_outcome, "boundary": c.boundary,
+                     "text": c.text}
+                    for c in d.counterfactuals],
+                "signals": dataclasses.asdict(d.signals) if d.signals else None,
+            }
+
+        all_decisions = [
+            decision_json(ranked.best if d.target_id == ranked.best.target_id else d)
+            for d in ranked.all_decisions
+        ]
+        return {
+            "best": decision_json(ranked.best),
+            "margin": round(ranked.margin, 4),
+            "all_decisions": all_decisions,
+        }
 
     @app.get("/api/targets/{target_id}/model3d")
     def target_model3d(target_id: str):
