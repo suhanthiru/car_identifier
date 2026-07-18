@@ -103,6 +103,38 @@ def test_unknown_camera_rejected(client):
     assert resp.status_code == 422
 
 
+def test_render_returns_png(client):
+    import json
+    import urllib.parse
+
+    payload = urllib.parse.quote(json.dumps({
+        "plate": "ABC-1234", "make": "Toyota", "model": "Camry",
+        "body_type": "sedan", "color": "silver", "instance_attrs": {}}))
+    resp = client.get(f"/api/inspect/render?camera_id=cam-ctr&timestamp_s=1000&payload={payload}")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "image/png"
+    assert resp.content[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def test_render_unknown_color_falls_back(client):
+    import json
+    import urllib.parse
+
+    payload = urllib.parse.quote(json.dumps({"color": "chartreuse"}))
+    resp = client.get(f"/api/inspect/render?camera_id=cam-ctr&timestamp_s=1000&payload={payload}")
+    assert resp.status_code == 200  # falls back to gray rather than 500ing
+
+
+def test_render_unknown_camera_rejected(client):
+    resp = client.get("/api/inspect/render?camera_id=nope&timestamp_s=1000&payload=%7B%7D")
+    assert resp.status_code == 422
+
+
+def test_render_bad_payload_rejected(client):
+    resp = client.get("/api/inspect/render?camera_id=cam-ctr&timestamp_s=1000&payload=not-json")
+    assert resp.status_code == 422
+
+
 def test_no_side_effects(client):
     """The sandbox must never create a real target or audit entry."""
     client.post("/api/inspect/evaluate", json={
