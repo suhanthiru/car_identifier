@@ -78,25 +78,11 @@ let stageRouteLines = [];
 
 async function initStageMap() {
   stageMap = L.map("stage-map", { zoomControl: false, attributionControl: false });
-  const byId = {};
-  CAMERAS.forEach((c) => { byId[c.camera_id] = c; });
   let adjacency = [];
+  let worldSource = { source: "synthetic" };
   try { adjacency = await api("/api/adjacency"); } catch (e) { /* map still shows nodes */ }
-  const seen = new Set();
-  adjacency.forEach((e) => {
-    const key = [e.src, e.dst].sort().join("|");
-    if (seen.has(key)) return;
-    seen.add(key);
-    if (!byId[e.src] || !byId[e.dst]) return;
-    L.polyline([[byId[e.src].lat, byId[e.src].lon], [byId[e.dst].lat, byId[e.dst].lon]],
-      { color: "#243247", weight: 2, interactive: false }).addTo(stageMap);
-  });
-  CAMERAS.forEach((c) => {
-    cameraMarkers[c.camera_id] = L.circleMarker([c.lat, c.lon], {
-      radius: 6, color: "#3d5271", weight: 2, fillColor: "#16202e", fillOpacity: 1,
-    }).addTo(stageMap).bindTooltip(`${c.name} (${c.camera_id})`, {
-      direction: "top", offset: [0, -6] });
-  });
+  try { worldSource = await api("/api/world_source"); } catch (e) { /* default synthetic */ }
+  cameraMarkers = renderRoadMap(stageMap, CAMERAS, adjacency, worldSource.source).cameraMarkers;
   if (CAMERAS.length) {
     stageMap.fitBounds(CAMERAS.map((c) => [c.lat, c.lon]), { padding: [22, 22] });
   }
