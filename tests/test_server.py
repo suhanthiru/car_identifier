@@ -55,6 +55,27 @@ def test_world_endpoints(client):
     assert all(e["min_s"] < e["max_s"] for e in adjacency)
 
 
+def test_world_source_defaults_synthetic(client):
+    assert client.get("/api/world_source").json() == {"source": "synthetic"}
+
+
+def test_world_source_can_be_set_real(tmp_path):
+    from server.api import create_app
+
+    app = create_app(db_url=f"sqlite:///{tmp_path}/real.sqlite",
+                     crops_dir=str(tmp_path / "crops"), world_source="real")
+    with TestClient(app) as c:
+        assert c.get("/api/world_source").json() == {"source": "real"}
+
+
+def test_world_source_rejects_unknown_value(tmp_path):
+    from server.api import create_app
+
+    with pytest.raises(ValueError, match="world_source"):
+        create_app(db_url=f"sqlite:///{tmp_path}/bad.sqlite",
+                   crops_dir=str(tmp_path / "crops"), world_source="fictional")
+
+
 def test_audit_chain_records_state_changes(client, tmp_path):
     target_id = flag(client)
     client.post("/api/sightings", json=sighting(crop=True))
