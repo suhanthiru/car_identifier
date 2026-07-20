@@ -9,6 +9,14 @@ Off-the-shelf glue, not a contribution of this project. Notes for honesty:
   similarity, not real vehicle identity. Look-alike vehicles are *supposed*
   to collide in embedding space here — that is the scenario the reasoning
   layer exists to handle.
+
+POSSIBLE FUTURE SWAP: JD AI's FastReID (github.com/JDAI-CV/fast-reid) ships a
+pretrained SBS(R50-ibn) VeRi-776 checkpoint (97.0% Rank-1 / 81.9% mAP —
+well above what this OSNet-x0_25 default should reach). Swapping it in as an
+alternate backend here would let the eval harness show the cascade's ablation
+delta holds up on a near-SOTA embedding, not just a weak one. Not wired in;
+would need a standalone loader for FastReID's checkpoint format without
+depending on its full training framework.
 """
 from __future__ import annotations
 

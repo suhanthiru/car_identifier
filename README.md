@@ -67,6 +67,10 @@ python demo.py                       # synthetic live-console demo (no datasets 
 
 **Cut (roadmap):** DVR timeline, camera-feed wall, on-device accelerators, drone specifics, training/fine-tuning loops.
 
+**Possible future embedder swaps:** the ReID embedder is intentionally off-the-shelf and swappable (`perception/embedder.py`) — the cascade's plausibility layer doesn't care how good the appearance vector is. Two upgrades worth doing once real data is flowing:
+- **OSNet, VeRi-776-trained weights** (vs. today's ImageNet-pretrained default) — a same-architecture, same-size upgrade via the torchreid model zoo.
+- **[FastReID](https://github.com/JDAI-CV/fast-reid)'s pretrained SBS(R50-ibn) checkpoint**, JD AI Research's production ReID platform. Its published VeRi-776 numbers (97.0% Rank-1, 81.9% mAP) are well above what OSNet-x0_25 should reach — trained end-to-end on vehicle identities with a much larger backbone (~24M vs ~2M params). Swapping it in as a second `Embedder` backend would let RESULTS.md report the cascade's ablation delta *on top of a nearer-SOTA embedding*, showing the reasoning layer still adds value (fewer look-alike false positives, honest refusals) even when the base embedder is already strong — a more convincing result than only demonstrating it against a weak embedder. Main integration cost: loading FastReID's checkpoint format standalone without pulling in its full training framework as a dependency (needs a spike to confirm feasibility).
+
 ## Design decisions
 
 **Cascade over a single score.** A fused similarity score lets appearance outvote near-conclusive cheap checks — backwards for look-alikes, which are selected for maximal appearance similarity. Evidence is consulted in reliability order and ReID is a tiebreaker only: it ranks surviving candidates, it cannot create a match, and any veto is final. A plate match that fails the physics check flags a clone/clock-skew anomaly for a human instead of confirming.
