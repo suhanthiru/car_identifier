@@ -171,6 +171,31 @@ def score_from_signals(signals: MatchSignals, config: CascadeConfig | None = Non
                           distinctiveness=dist)
 
 
+def score_breakdown(signals: MatchSignals) -> dict[str, float]:
+    """Per-component contribution to `score_from_signals`'s score, for display.
+
+    Mirrors that function's conditions exactly (same weights, same order),
+    so a UI can show a REAL confidence breakdown instead of illustrative
+    percentages. Components can sum above 1.0 before the final min(1.0, ...)
+    cap applied in `score_from_signals` — shown uncapped here so each
+    contribution is honest about what it actually added.
+    """
+    out: dict[str, float] = {}
+    if signals.plate_exact:
+        out["plate"] = W_PLATE_EXACT
+    elif signals.plate_near:
+        out["plate"] = W_PLATE_NEAR
+    if signals.attrs_consistent:
+        out["class_attrs"] = W_CLASS_ATTRS
+    if signals.mark_match_count:
+        out["instance_marks"] = W_INSTANCE_ATTR * signals.mark_match_count
+    if signals.geometry_consistent:
+        out["geometry"] = W_GEOMETRY
+    if signals.has_gallery and sum(out.values()) > 0 and not signals.any_veto:
+        out["reid"] = W_REID_MAX * signals.reid_prob
+    return out
+
+
 def evaluate(
     obs: Observation,
     profile: TargetProfile,
