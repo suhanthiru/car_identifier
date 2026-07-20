@@ -16,7 +16,9 @@ from dataclasses import dataclass, replace
 
 from perception.plates import CONFUSIONS
 from perception.types import Observation
-from reasoning.plausibility import GEOM_PREFIX, PLATE_VETO_CONF, STALE_TRACK_S, _char_diffs
+from reasoning.plausibility import (
+    GEOM_PREFIX, PLATE_VETO_CONF, STALE_TRACK_S, _char_diffs, _partial_match,
+)
 from reasoning.profile import TargetProfile
 from sim.road_graph import RoadGraph
 
@@ -28,6 +30,12 @@ class MatchSignals:
     plate_near: bool = False          # one OCR-confusable char off
     plate_contradiction: bool = False  # clean mismatch, high confidence -> veto
     plate_available: bool = False     # target has a plate AND sighting read one
+    # A real ALPR partial read (some characters masked "_") whose KNOWN
+    # positions all agree with the target plate. Weaker than plate_exact,
+    # stronger than no read -- see reasoning/plausibility.py's _partial_match.
+    plate_partial_match: bool = False
+    plate_known_chars: int = 0
+    plate_total_chars: int = 0
     # class/instance tier
     attrs_consistent: bool = False
     class_mismatches: tuple[str, ...] = ()
@@ -77,7 +85,13 @@ def _plate_signals(obs: Observation, profile: TargetProfile) -> dict:
     diffs = _char_diffs(seen, want)
     if diffs is not None and len(diffs) == 1 and CONFUSIONS.get(diffs[0][0]) == diffs[0][1]:
         out["plate_near"] = True
-    elif obs.plate.confidence >= PLATE_VETO_CONF:
+        return out
+    partial = _partial_match(seen, want)
+    if partial is not None:
+        out["plate_partial_match"] = True
+        out["plate_known_chars"], out["plate_total_chars"] = partial
+        return out
+    if obs.plate.confidence >= PLATE_VETO_CONF:
         out["plate_contradiction"] = True
     return out
 

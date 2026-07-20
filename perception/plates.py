@@ -92,6 +92,18 @@ class FastPlateOcrReader:
         texts = engine.run(gray)
         if not texts or not texts[0].strip("_"):
             return None
-        # fast-plate-ocr pads with underscores; it does not expose a
-        # per-read confidence, so we report a fixed mid confidence.
-        return PlateRead(text=texts[0].strip("_"), confidence=0.7, source=SOURCE_MODEL)
+        # fast-plate-ocr pads characters it couldn't determine with "_".
+        # Keep the mask as-is: stripping it (the old behavior) throws away
+        # exactly the partial-read signal downstream reasoning wants, and
+        # can shift character positions if the unread chars are at an edge
+        # (e.g. "__AB1234" -> "AB1234"), which would silently corrupt the
+        # position-by-position comparison against a target plate.
+        text = texts[0]
+        known = sum(1 for c in text if c != "_")
+        total = len(text) or 1
+        # The engine exposes no per-read confidence. Derive one from
+        # completeness rather than reporting a fixed number for every read
+        # regardless of how much of the plate was actually determined —
+        # a fully-read plate and a half-masked one are not equally trustworthy.
+        confidence = 0.4 + 0.5 * (known / total)
+        return PlateRead(text=text, confidence=confidence, source=SOURCE_MODEL)

@@ -128,6 +128,13 @@ def score_from_signals(signals: MatchSignals, config: CascadeConfig | None = Non
     elif signals.plate_near:
         score += W_PLATE_NEAR
         tier = "plate"
+    elif signals.plate_partial_match:
+        # Real ALPR reads a plate on a gradient, not read/no-read: a mostly-
+        # clean partial read carries more weight than a mostly-masked one,
+        # capped at what a full near-miss (plate_near) is worth.
+        completeness = signals.plate_known_chars / max(1, signals.plate_total_chars)
+        score += W_PLATE_NEAR * completeness
+        tier = "plate"
     if signals.attrs_consistent:
         score += W_CLASS_ATTRS
         if tier == "none":
@@ -185,6 +192,9 @@ def score_breakdown(signals: MatchSignals) -> dict[str, float]:
         out["plate"] = W_PLATE_EXACT
     elif signals.plate_near:
         out["plate"] = W_PLATE_NEAR
+    elif signals.plate_partial_match:
+        completeness = signals.plate_known_chars / max(1, signals.plate_total_chars)
+        out["plate"] = W_PLATE_NEAR * completeness
     if signals.attrs_consistent:
         out["class_attrs"] = W_CLASS_ATTRS
     if signals.mark_match_count:

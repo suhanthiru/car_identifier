@@ -62,6 +62,22 @@ def test_plate_absent_cases_are_info():
     assert check_plate(make_obs(plate="ABC-1234"), make_profile(plate=""))[0].kind == KIND_INFO
 
 
+def test_plate_partial_read_with_known_agreement_is_weak_support():
+    """Real ALPR on oblique footage: some characters read, some masked ('_'),
+    and every character that WAS read agrees with the target plate."""
+    facts = check_plate(make_obs(plate="ABC-1_34", plate_conf=0.95), make_profile())
+    assert facts[0].kind == KIND_SUPPORT
+    assert "7 of 8" in facts[0].text
+    assert "unreadable" in facts[0].text
+
+
+def test_plate_partial_read_with_known_contradiction_still_vetoes():
+    """A masked character elsewhere does not launder a real contradiction
+    at a KNOWN position -- this must veto exactly as a full clean mismatch."""
+    facts = check_plate(make_obs(plate="ABC-1_99", plate_conf=0.95), make_profile())
+    assert has_veto(facts)
+
+
 # ------------------------------------------------------------- transit check
 
 def test_transit_without_history_is_info(graph):
