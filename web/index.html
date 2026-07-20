@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Eyes Everywhere — synthetic demo console</title>
+<title>Eyes Everywhere — operator console</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <link rel="stylesheet" href="style.css">
@@ -10,53 +10,82 @@
 <body>
 <div id="banner">SYNTHETIC DATA ONLY — every camera, vehicle and plate on this screen is simulated
   <a href="inspector.html">&rarr; reasoning inspector (see the cascade think)</a></div>
-<div id="layout">
-  <div id="map"></div>
-  <aside id="sidebar">
-    <section id="flag-section">
-      <h2>Flag target</h2>
-      <form id="flag-form">
-        <input id="flag-label" placeholder="label (e.g. 'silver camry - case 12')" required>
-        <input id="flag-plate" placeholder="plate (optional, e.g. ABC-1234)">
-        <div class="row">
-          <select id="flag-body">
-            <option value="">body: any</option>
-            <option>sedan</option><option>suv</option>
-            <option>pickup</option><option>wagon</option>
-          </select>
-          <select id="flag-color">
-            <option value="">color: any</option>
-            <option>silver</option><option>black</option><option>white</option>
-            <option>gray</option><option>red</option><option>blue</option>
-          </select>
-        </div>
-        <button type="submit">Flag</button>
-      </form>
-    </section>
-    <section id="targets-section">
-      <h2>Targets</h2>
-      <div id="targets"></div>
-    </section>
-    <section id="reviews-section">
-      <h2>Review queue <span id="review-count" class="pill">0</span></h2>
-      <div id="reviews"></div>
-    </section>
-    <section id="alerts-section">
-      <h2>Alerts</h2>
-      <div id="alerts"></div>
-    </section>
-    <section id="audit-section">
-      <h2>Audit log <span id="audit-badge" class="pill">…</span></h2>
-      <div id="audit"></div>
-    </section>
-  </aside>
-</div>
-<div id="dossier" class="hidden">
-  <div id="dossier-card">
-    <button id="dossier-close">&times;</button>
-    <div id="dossier-body"></div>
+
+<div id="topbar">
+  <div class="tb-left">
+    <div class="tb-logo"><div class="tb-logo-dot"></div></div>
+    <div class="tb-title">EYES EVERYWHERE</div>
+    <div class="tb-sep"></div>
+    <div class="tb-sub" id="tb-subtitle">RESEARCH CONSOLE</div>
+  </div>
+  <div class="tb-right">
+    <div class="tb-stat"><span class="tb-dot tb-dot-green"></span><span id="tb-cameras">— cameras</span></div>
+    <div class="tb-sep"></div>
+    <div class="tb-stat"><span class="tb-dot tb-dot-blue"></span>CHAIN <span id="tb-chain" class="mono accent">—</span></div>
   </div>
 </div>
+
+<div id="main-grid">
+
+  <div id="map-panel" class="panel">
+    <div class="panel-head">
+      <span>LIVE MAP</span>
+    </div>
+    <div id="map"></div>
+  </div>
+
+  <div id="queue-panel" class="panel">
+    <div class="panel-head">
+      <span>REVIEW QUEUE <span id="review-count" class="pill">0</span></span>
+    </div>
+    <div id="reviews" class="panel-scroll"></div>
+  </div>
+
+  <div id="side-panel" class="panel">
+    <div class="panel-head">
+      <span id="side-title">TARGETS</span>
+      <button id="side-back" class="link-btn hidden">&larr; back</button>
+    </div>
+    <div id="side-targets" class="panel-scroll">
+      <section id="flag-section">
+        <form id="flag-form">
+          <input id="flag-label" placeholder="label (e.g. 'silver camry - case 12')" required>
+          <input id="flag-plate" placeholder="plate (optional, e.g. ABC-1234)">
+          <div class="row">
+            <select id="flag-body">
+              <option value="">body: any</option>
+              <option>sedan</option><option>suv</option>
+              <option>pickup</option><option>wagon</option>
+            </select>
+            <select id="flag-color">
+              <option value="">color: any</option>
+              <option>silver</option><option>black</option><option>white</option>
+              <option>gray</option><option>red</option><option>blue</option>
+            </select>
+          </div>
+          <button type="submit">Flag target</button>
+        </form>
+      </section>
+      <div id="targets"></div>
+    </div>
+    <div id="side-dossier" class="panel-scroll hidden"></div>
+  </div>
+
+</div>
+
+<div id="footer-strip">
+  <div class="fs-left"><span id="fs-chain-status" class="ok">✓</span><span id="fs-chain-text">chain intact</span></div>
+  <button id="fs-audit-toggle" class="link-btn">Open full audit log →</button>
+</div>
+
+<div id="audit-drawer" class="hidden">
+  <div class="drawer-head">
+    <span>AUDIT LOG <span id="audit-badge" class="pill">…</span></span>
+    <button id="audit-close" class="link-btn">close ✕</button>
+  </div>
+  <div id="audit" class="panel-scroll"></div>
+</div>
+
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="roadmap.js"></script>
 <script src="app.js"></script>
