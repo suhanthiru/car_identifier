@@ -91,8 +91,11 @@ def _parse_label_xml(path: Path) -> dict[str, tuple[str, str]]:
     """imageName -> (color, type). Tolerant of the file being absent."""
     if not path.exists():
         return {}
-    # VeRi XMLs are occasionally encoded as gb2312; ET honors the declaration.
-    root = ET.parse(path).getroot()
+    # VeRi XMLs declare encoding="gb2312", but expat (ET.parse's underlying
+    # parser) doesn't support multi-byte encodings and raises ValueError on
+    # them — decode with Python's own gb2312 codec first, then hand ET
+    # already-decoded text (the values themselves are pure ASCII digits).
+    root = ET.fromstring(path.read_bytes().decode("gb2312"))
     out: dict[str, tuple[str, str]] = {}
     for item in root.iter("Item"):
         name = item.get("imageName", "")
