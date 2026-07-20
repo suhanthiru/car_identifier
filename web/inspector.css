@@ -143,27 +143,66 @@ button.primary:hover { filter: brightness(1.08); }
 .metric-row b { color: var(--text); }
 
 .dist-meter {
-  height: 8px; background: var(--line); border-radius: 4px; position: relative;
-  margin: 4px 0 10px;
+  height: 10px; background: var(--panel); border: 1px solid var(--line);
+  border-radius: 5px; position: relative; margin: 4px 0 10px;
 }
-.dist-meter > .fill { height: 100%; border-radius: 4px; background: var(--accent); }
+.dist-meter > .below-floor {
+  position: absolute; left: 0; top: 0; bottom: 0; background: rgba(224,168,60,.18);
+  border-radius: 5px 0 0 5px;
+}
+.dist-meter > .fill { position: absolute; inset: 0; height: 100%; border-radius: 5px;
+  background: var(--accent); opacity: .85; }
 .dist-meter > .floor-mark {
-  position: absolute; top: -2px; bottom: -2px; width: 2px; background: var(--veto);
+  position: absolute; top: -3px; bottom: -3px; width: 2px; background: var(--tentative);
 }
+.dist-meter-scale { display: flex; justify-content: space-between; font-size: 9px;
+  color: var(--dim); font-family: Consolas, monospace; margin-top: -6px; margin-bottom: 8px; }
+.dist-meter-scale .floor-label { color: var(--tentative); }
+
+/* ------------------------------------------------------- verdict hero */
+.verdict-hero {
+  border-radius: 5px; padding: 10px; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 4px; margin-bottom: 10px;
+}
+.verdict-hero .vh-icon { font-size: 20px; }
+.verdict-hero .vh-label { font-size: 11px; font-weight: 700; letter-spacing: .04em; }
+.verdict-hero .vh-conf { font-family: Consolas, monospace; font-size: 10px; color: var(--dim); }
+.verdict-hero.verdict-confirmed { background: rgba(61,220,132,.1); border: 1px solid var(--confirmed); }
+.verdict-hero.verdict-confirmed .vh-icon, .verdict-hero.verdict-confirmed .vh-label { color: var(--confirmed); }
+.verdict-hero.verdict-likely { background: rgba(77,163,255,.1); border: 1px solid var(--coasting); }
+.verdict-hero.verdict-likely .vh-icon, .verdict-hero.verdict-likely .vh-label { color: var(--coasting); }
+.verdict-hero.verdict-candidate { background: rgba(224,168,60,.1); border: 1px solid var(--tentative); }
+.verdict-hero.verdict-candidate .vh-icon, .verdict-hero.verdict-candidate .vh-label { color: var(--tentative); }
+.verdict-hero.verdict-rejected { background: rgba(255,93,93,.1); border: 1px solid var(--veto); }
+.verdict-hero.verdict-rejected .vh-icon, .verdict-hero.verdict-rejected .vh-label { color: var(--veto); }
+.verdict-hero.verdict-undecided { background: rgba(119,128,140,.1); border: 1px solid var(--lost); }
+.verdict-hero.verdict-undecided .vh-icon, .verdict-hero.verdict-undecided .vh-label { color: var(--lost); }
 
 .candidate-set {
   background: #241c08; border-left: 3px solid var(--tentative); border-radius: 3px;
   padding: 6px 8px; margin-bottom: 8px; font-size: 12px; color: var(--text);
 }
 
-details.signals-detail { margin-top: 8px; font-size: 11px; }
-details.signals-detail summary { cursor: pointer; color: var(--dim);
-  text-transform: uppercase; letter-spacing: .05em; font-size: 10px; }
-.signals-table { width: 100%; border-collapse: collapse; margin-top: 6px;
-  font-family: Consolas, monospace; }
-.signals-table td { padding: 2px 6px; border-bottom: 1px solid var(--line); }
+.signals-section-label { font-size: 9.5px; color: var(--dim); letter-spacing: .05em;
+  text-transform: uppercase; margin: 10px 0 6px; }
+.signals-table { width: 100%; border-collapse: collapse;
+  font-family: Consolas, monospace; background: #0d1117; border: 1px solid var(--line);
+  border-radius: 5px; }
+.signals-table td { padding: 3px 10px; border-bottom: 1px solid var(--line); font-size: 10.5px; }
+.signals-table tr:last-child td { border-bottom: none; }
 .signals-table td:first-child { color: var(--dim); }
+.signals-table td:last-child { text-align: right; color: var(--text); }
 .signals-table td.set-true { color: var(--confirmed); }
 .signals-table td.set-false { color: var(--dim); }
+
+.counterfactuals .cf {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+}
+.counterfactuals .cf .cf-text { flex: 1; }
+.cf-try {
+  flex: none; background: none; border: 1px solid var(--line); color: var(--accent);
+  border-radius: 3px; padding: 2px 7px; font-size: 9.5px; cursor: pointer;
+}
+.cf-try:hover { border-color: var(--accent); }
 
 .margin-note { font-size: 11px; color: var(--dim); margin: -4px 0 4px; }
