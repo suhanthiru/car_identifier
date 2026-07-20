@@ -7,6 +7,13 @@ const STATE_COLORS = {
 };
 const TRAIL_LENGTH = 12;
 
+// Real weight constants (reasoning/weights.py) — never invented, so the
+// confidence-breakdown popover is honest rather than illustrative.
+const WEIGHT_LABELS = {
+  plate: "plate", class_attrs: "class attrs", instance_marks: "distinguishing marks",
+  geometry: "geometry", reid: "appearance (reid, tiebreaker)",
+};
+
 const map = L.map("map", { zoomControl: false, attributionControl: false });
 let cameraMarkers = {};   // camera_id -> circleMarker
 let targetMarkers = {};   // target_id -> marker
@@ -14,6 +21,7 @@ let targetTrails = {};    // target_id -> polyline
 let trailPoints = {};     // target_id -> [[lat,lon],...]
 let expectedRings = [];   // pulsing rings on expected-now cameras
 let latestSnapshot = {};
+let openDossierId = "";   // "" when the side panel is showing the targets list
 
 /* ---------------------------------------------------------------- helpers */
 
@@ -23,21 +31,34 @@ async function api(path, opts) {
   return resp.status === 204 ? null : resp.json();
 }
 
-function factsHtml(text) {
-  return (text || "").split("\n").map((line) => {
-    const cls = line.startsWith("[+]") ? "f-support"
-      : line.startsWith("[X]") ? "f-veto"
-      : line.startsWith("[!]") ? "f-caution" : "f-info";
-    return `<span class="${cls}">${escapeHtml(line)}</span>`;
-  }).join("\n");
-}
-
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
 function fmtTime(t) { return `t+${Math.round(t)}s`; }
+
+const FACT_ICON = { support: "+", veto: "✕", caution: "!", info: "i" };
+
+function factRowHtml(f) {
+  const icon = FACT_ICON[f.kind] || "i";
+  const label = (f.check ? f.check.toUpperCase() + " · " : "") + f.kind.toUpperCase();
+  return `<div class="fact-row ${f.kind}">
+    <span class="fi">${icon}</span><span class="ft">${escapeHtml(f.text)}</span>
+    <div class="fact-tip"><div class="ft-head">${escapeHtml(label)}</div>${escapeHtml(f.text)}</div>
+  </div>`;
+}
+
+function confMeterHtml(score, breakdown) {
+  const pct = Math.round(Math.min(1, score) * 100);
+  const rows = Object.entries(breakdown || {}).map(([k, v]) =>
+    `${WEIGHT_LABELS[k] || k} → +${v.toFixed(2)}`).join("<br>");
+  return `<div class="conf-meter">
+    <div class="conf-fill" style="width:${pct}%"></div>
+    <div class="conf-tip"><div class="ft-head">Confidence breakdown (real weights)</div>
+      ${rows || "no contributing signals"}<br>net (capped at 1.0): ${pct}%</div>
+  </div>`;
+}
 
 /* ------------------------------------------------------------------- map */
 
@@ -48,6 +69,12 @@ async function initMap() {
   ]);
   cameraMarkers = renderRoadMap(map, cameras, adjacency, worldSource.source).cameraMarkers;
   map.fitBounds(cameras.map((c) => [c.lat, c.lon]), { padding: [46, 46] });
+  // Cameras in this world never go offline mid-run (synthetic) or don't yet
+  // have a live health feed (real/CityFlow, pre-K) -- report the honest
+  // "all present" count rather than fabricating a partial online figure.
+  document.getElementById("tb-cameras").textContent = `${cameras.length}/${cameras.length} CAMERAS`;
+  document.getElementById("tb-subtitle").textContent =
+    worldSource.source === "real" ? "REAL-DATA CONSOLE" : "SYNTHETIC RESEARCH CONSOLE";
 }
 
 function flashContact(msg) {
@@ -133,6 +160,83 @@ function renderTargetList(targets) {
     card.onclick = () => openDossier(id);
     el.appendChild(card);
   });
+  if (openDossierId && !targets[openDossierId]) showTargetsView();
+}
+
+function reviewCardHtml(r) {
+  const isAnomaly = r.kind === "anomaly";
+  // Refusal-to-individuate (feature B) fires whenever the distinctiveness
+  // floor is missed, whether that leaves 1 candidate (nothing else to
+  // compare against yet) or several -- the "distinctiveness" caution fact
+  // is the real signal, not the candidate count.
+  const facts0 = (r.structured_facts && r.structured_facts.length)
+    ? r.structured_facts
+    : [];
+  const isCandidate = facts0.some((f) => f.check === "distinctiveness")
+    && (r.candidate_ids || []).length > 0;
+  const facts = (r.structured_facts && r.structured_facts.length)
+    ? r.structured_facts
+    : (r.facts || "").split("\n").filter(Boolean).map((line) => ({
+        kind: line.startsWith("[+]") ? "support" : line.startsWith("[X]") ? "veto"
+          : line.startsWith("[!]") ? "caution" : "info",
+        text: line.replace(/^\[[+X!i]\]\s*/, ""), check: "",
+      }));
+
+  const sightingImg = r.sighting_crop
+    ? `<img src="${r.sighting_crop}" alt="sighting crop">`
+    : `<div class="no-crop">no crop</div>`;
+  const refImg = r.reference_crop
+    ? `<img src="${r.reference_crop}" alt="reference crop">`
+    : `<div class="no-crop">no reference yet</div>`;
+
+  if (isAnomaly) {
+    const headline = facts.find((f) => f.check === "transit" || f.kind === "veto") || facts[0];
+    return `<div class="review-card anomaly-collapsed" data-review="${r.review_id}">
+      <div><div class="ac-title">AUTO-FLAGGED · ANOMALY</div>
+        <div class="ac-sub">${escapeHtml(r.target_label || r.target_id)} — ${escapeHtml((headline && headline.text) || "")}</div></div>
+      <div style="color:var(--dim);font-size:9px">▸</div>
+    </div>`;
+  }
+
+  if (isCandidate) {
+    const chips = r.candidate_ids.map((c) =>
+      `<div class="candidate-chip">${escapeHtml(c)}</div>`).join("");
+    const note = facts.find((f) => f.check === "distinctiveness");
+    return `<div class="review-card candidate" data-review="${r.review_id}">
+      <div class="candidate-badge">CANDIDATE SET · ${r.candidate_ids.length} VEHICLES</div>
+      <div class="candidate-chips">${chips}</div>
+      <div class="candidate-note">${escapeHtml((note && note.text) ||
+        `Distinguishing marks insufficient (distinctiveness ${(r.distinctiveness ?? 0).toFixed(2)}). The system declines to assert an individual.`)}</div>
+      <div class="fact-list">${facts.filter((f) => f !== note).map(factRowHtml).join("")}</div>
+      <div class="rc-actions">
+        <button class="btn-accept">Accept best</button>
+        <button class="btn-reject">Reject</button>
+      </div>
+    </div>`;
+  }
+
+  return `<div class="review-card tentative" data-review="${r.review_id}">
+    <div class="rc-head">
+      <div class="rc-tag">NEEDS REVIEW</div>
+      <div class="rc-score mono">${Math.round(r.score * 100)}%</div>
+    </div>
+    <div class="rc-crops">
+      <figure>${sightingImg}</figure>
+      <span class="rc-vs">vs</span>
+      <figure>${refImg}</figure>
+    </div>
+    <div class="fact-list">${facts.map(factRowHtml).join("")}</div>
+    ${confMeterHtml(r.score, r.score_breakdown)}
+    ${(r.counterfactuals && r.counterfactuals.length) ? `
+    <div class="counterfactuals">
+      <div class="cf-label">What would change the outcome</div>
+      ${r.counterfactuals.map((c) => `<div class="cf">→ ${escapeHtml(c)}</div>`).join("")}
+    </div>` : ""}
+    <div class="rc-actions">
+      <button class="btn-accept">Accept</button>
+      <button class="btn-reject">Reject</button>
+    </div>
+  </div>`;
 }
 
 async function refreshReviews() {
@@ -141,38 +245,37 @@ async function refreshReviews() {
   const el = document.getElementById("reviews");
   el.innerHTML = reviews.length ? "" : `<div class="alert-row">queue empty</div>`;
   reviews.forEach((r) => {
-    const card = document.createElement("div");
-    const refused = (r.facts || "").includes("Cannot assert individual");
-    card.className = `review-card${r.kind === "anomaly" ? " anomaly" : ""}${refused ? " refused" : ""}`;
-    const sightingImg = r.sighting_crop
-      ? `<img src="${r.sighting_crop}" alt="sighting crop">`
-      : `<div class="no-crop">no crop</div>`;
-    const refImg = r.reference_crop
-      ? `<img src="${r.reference_crop}" alt="reference crop">`
-      : `<div class="no-crop">no reference yet</div>`;
-    const prefix = r.kind === "anomaly" ? "ANOMALY — "
-      : refused ? "CANDIDATE SET — " : "";
-    card.innerHTML = `
-      <b>${prefix}${escapeHtml(r.target_label || r.target_id)}</b>
-      <span style="float:right;color:var(--dim)">score ${r.score.toFixed(2)}</span>
-      <div class="crops">
-        <figure>${sightingImg}<figcaption>this sighting</figcaption></figure>
-        <figure>${refImg}<figcaption>target reference</figcaption></figure>
-      </div>
-      <div class="facts">${factsHtml(r.facts)}</div>
-      ${(r.counterfactuals && r.counterfactuals.length) ? `
-      <div class="counterfactuals">
-        <div class="cf-label">What would change the outcome</div>
-        ${r.counterfactuals.map((c) => `<div class="cf">→ ${escapeHtml(c)}</div>`).join("")}
-      </div>` : ""}
-      <div class="actions">
-        <button class="btn-accept">Accept match</button>
-        <button class="btn-reject">Reject</button>
-      </div>`;
-    card.querySelector(".btn-accept").onclick = () => resolveReview(r.review_id, true);
-    card.querySelector(".btn-reject").onclick = () => resolveReview(r.review_id, false);
+    const wrap = document.createElement("div");
+    wrap.innerHTML = reviewCardHtml(r);
+    const card = wrap.firstElementChild;
     el.appendChild(card);
+    if (card.classList.contains("anomaly-collapsed")) {
+      card.onclick = () => expandAnomalyCard(card, r);
+      return;
+    }
+    const accept = card.querySelector(".btn-accept");
+    const reject = card.querySelector(".btn-reject");
+    if (accept) accept.onclick = () => resolveReview(r.review_id, true);
+    if (reject) reject.onclick = () => resolveReview(r.review_id, false);
   });
+}
+
+function expandAnomalyCard(card, r) {
+  card.classList.remove("anomaly-collapsed");
+  card.classList.add("anomaly-expanded", "review-card");
+  const facts = (r.structured_facts && r.structured_facts.length)
+    ? r.structured_facts
+    : [];
+  card.innerHTML = `
+    <div class="rc-head"><div class="rc-tag" style="color:var(--veto)">ANOMALY</div>
+      <div class="rc-score mono">${Math.round(r.score * 100)}%</div></div>
+    <div class="fact-list">${facts.map(factRowHtml).join("")}</div>
+    <div class="rc-actions">
+      <button class="btn-accept">Accept</button>
+      <button class="btn-reject">Reject</button>
+    </div>`;
+  card.querySelector(".btn-accept").onclick = () => resolveReview(r.review_id, true);
+  card.querySelector(".btn-reject").onclick = () => resolveReview(r.review_id, false);
 }
 
 async function resolveReview(reviewId, accept) {
@@ -200,78 +303,116 @@ async function refreshAudit() {
       <span style="float:right;font-family:Consolas,monospace">${escapeHtml(e.entry_hash)}</span>`;
     el.appendChild(row);
   });
+  const latest = rows[0];
+  const status = document.getElementById("fs-chain-status");
+  const text = document.getElementById("fs-chain-text");
+  status.textContent = audit.verified ? "✓" : "✕";
+  status.className = audit.verified ? "ok" : "bad";
+  text.textContent = latest
+    ? `chain ${audit.verified ? "verified" : "TAMPERED"} · #${latest.seq} · ${latest.entry_hash}`
+    : "no entries yet";
+  document.getElementById("tb-chain").textContent = latest ? `#${latest.seq} ${latest.entry_hash}` : "—";
 }
 
+document.getElementById("fs-audit-toggle").onclick = () =>
+  document.getElementById("audit-drawer").classList.remove("hidden");
+document.getElementById("audit-close").onclick = () =>
+  document.getElementById("audit-drawer").classList.add("hidden");
+
 function pushAlert(msg) {
-  const el = document.getElementById("alerts");
-  const row = document.createElement("div");
-  row.className = `alert-row kind-${msg.type}`;
-  const target = msg.target_id ? ` ${msg.target_id}` : "";
-  const extra = msg.detail && msg.detail.verdict ? ` (${msg.detail.verdict})`
-    : msg.detail && msg.detail.to ? ` -> ${msg.detail.to}` : "";
-  row.innerHTML = `<b>${escapeHtml(msg.type)}</b>${escapeHtml(target + extra)}
-    <span style="float:right">${fmtTime(msg.timestamp_s || 0)}</span>`;
-  el.prepend(row);
-  while (el.children.length > 40) el.removeChild(el.lastChild);
+  // Alerts feed folded into the audit drawer's context in the redesigned
+  // console; the review queue + dossier already surface the same events
+  // with fuller context, so this just keeps the audit chain fresh.
 }
 
 /* --------------------------------------------------------------- dossier */
 
+function showTargetsView() {
+  openDossierId = "";
+  document.getElementById("side-title").textContent = "TARGETS";
+  document.getElementById("side-back").classList.add("hidden");
+  document.getElementById("side-targets").classList.remove("hidden");
+  document.getElementById("side-dossier").classList.add("hidden");
+}
+
+function showDossierView() {
+  document.getElementById("side-title").textContent = "TARGET DOSSIER";
+  document.getElementById("side-back").classList.remove("hidden");
+  document.getElementById("side-targets").classList.add("hidden");
+  document.getElementById("side-dossier").classList.remove("hidden");
+}
+
 async function openDossier(targetId) {
+  openDossierId = targetId;
   const d = await api(`/api/targets/${targetId}`);
   let model3d = { exists: false };
   try { model3d = await api(`/api/targets/${targetId}/model3d`); } catch (e) { /* optional */ }
   const live = d.live || {};
   const attrs = Object.entries(d.class_attrs).map(([k, v]) =>
-    `<tr><td>${escapeHtml(k)}</td><td>${escapeHtml(v)}</td></tr>`).join("");
+    `<div class="trait-row"><span class="tk">${escapeHtml(k)}</span><span class="tv">${escapeHtml(v)}</span></div>`).join("");
   const marks = Object.entries(d.instance_attrs)
-    .filter(([k]) => !k.startsWith("geom3d:"))  // shown in the 3D section
+    .filter(([k]) => !k.startsWith("geom3d:"))
     .map(([k, v]) =>
-      `<tr><td>${escapeHtml(k)}</td><td>${escapeHtml(v)}</td></tr>`).join("");
+      `<div class="trait-row"><span class="tk">${escapeHtml(k)}</span><span class="tv">${escapeHtml(v)}</span></div>`).join("");
   const updates = d.profile_updates.map((u) =>
     `<tr><td>v${u.version}</td><td>${fmtTime(u.timestamp_s)}</td>
      <td>${escapeHtml(u.reason)}</td></tr>`).join("");
-  const chain = d.corroboration_chain.slice(-6).map((c) =>
-    `<tr><td>${fmtTime(c.timestamp_s)}</td><td>${escapeHtml(c.verdict)}</td>
-     <td>belief ${c.belief_after.toFixed(2)}</td></tr>`).join("");
-  document.getElementById("dossier-body").innerHTML = `
-    <h3>${escapeHtml(d.label || d.target_id)}</h3>
-    <div class="sub">${d.target_id} · state ${escapeHtml(live.state || "?")} ·
-      belief ${live.belief ?? 0} · profile v${live.profile_version ?? 0} ·
-      gallery ${d.gallery_size} crops</div>
-    ${d.reference_crop ? `<img src="/api/crops/${d.reference_crop}" style="width:160px;border-radius:4px">` : ""}
-    <table><tr><th colspan="2">Class attributes</th></tr>${attrs ||
-      "<tr><td colspan=2>none recorded</td></tr>"}</table>
-    <table><tr><th colspan="2">Distinguishing marks (sim-labeled)</th></tr>${marks ||
-      "<tr><td colspan=2>none recorded</td></tr>"}</table>
+  const chain = d.corroboration_chain.slice(-6).reverse().map((c) => `
+    <div class="timeline-item">
+      <div class="dot" style="background:${c.verdict === "confirmed" ? "var(--confirmed)" : "var(--tentative)"}"></div>
+      <div class="ti-cam mono">${fmtTime(c.timestamp_s)}</div>
+      <div class="ti-sub">${escapeHtml(c.verdict)} · belief ${c.belief_after.toFixed(2)}</div>
+    </div>`).join("");
+
+  document.getElementById("side-dossier").innerHTML = `
+    <div class="dossier-header">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <span class="d-id">${escapeHtml(d.label || d.target_id)}</span>
+        <span class="d-state ${escapeHtml(live.state || "lost")}">${escapeHtml((live.state || "?").toUpperCase())}</span>
+      </div>
+      <div class="d-sub">${d.target_id} · belief ${live.belief ?? 0} ·
+        profile v${live.profile_version ?? 0} · gallery ${d.gallery_size} crops
+        ${d.plate ? " · plate " + escapeHtml(d.plate) : ""}</div>
+    </div>
     ${model3d.exists ? `
-    <h4 style="margin-top:12px">3D model (fused from confirmed sightings only)</h4>
-    <div class="sub">${model3d.observations} fused observation(s) ·
-      ${model3d.n_splats} splats ·
-      ${Math.round(model3d.observed_fraction * 100)}% confirmed by real sightings
-      ${model3d.geometry && model3d.geometry.trustworthy
-        ? ` · profile ${escapeHtml(model3d.geometry.body_profile)},
-            ${escapeHtml(model3d.geometry.length_class)}
-            (L/W ${model3d.geometry.lw_ratio})`
-        : " · geometry withheld: too little confirmed structure"}</div>
-    <img src="${model3d.turntable}" style="width:100%;border-radius:4px"
-         alt="turntable with provenance overlay">
-    <div class="sub"><span style="color:#3ddc84">green</span> = confirmed from
-      sightings · <span style="color:#ff5d5d">red</span> = generative-prior guess ·
-      downloads: <a href="${model3d.exports.splat}">model.splat</a>,
-      <a href="${model3d.exports.provenance_ply}">provenance .ply</a></div>` : ""}
-    <table><tr><th colspan="3">Profile updates (all gated + reversible)</th></tr>${updates ||
-      "<tr><td colspan=3>none — the gate has not opened</td></tr>"}</table>
-    <table><tr><th colspan="3">Recent corroboration chain</th></tr>${chain ||
-      "<tr><td colspan=3>no associations yet</td></tr>"}</table>`;
-  document.getElementById("dossier").classList.remove("hidden");
+    <div>
+      <div class="dossier-section-label">Reconstruction (fused from confirmed sightings only)</div>
+      <div class="dossier-recon"><img src="${model3d.turntable}" alt="turntable with provenance overlay"></div>
+      <div class="dossier-legend">
+        <span><span class="sw sw-good"></span>confirmed (${Math.round(model3d.observed_fraction * 100)}% of structure)</span>
+        <span><span class="sw sw-guess"></span>generative-prior guess</span>
+      </div>
+      <div class="d-sub" style="margin-top:4px">${model3d.observations} fused observation(s) · ${model3d.n_splats} splats
+        ${model3d.geometry && model3d.geometry.trustworthy
+          ? ` · ${escapeHtml(model3d.geometry.body_profile)}, ${escapeHtml(model3d.geometry.length_class)} (L/W ${model3d.geometry.lw_ratio})`
+          : " · geometry withheld: too little confirmed structure"}</div>
+    </div>` : (d.reference_crop ? `
+    <div class="dossier-recon"><img src="/api/crops/${d.reference_crop}" style="width:160px"></div>` : "")}
+    <div>
+      <div class="dossier-section-label">Sighting history</div>
+      <div class="timeline">${chain || '<div class="ti-sub">no associations yet</div>'}</div>
+    </div>
+    <div>
+      <div class="dossier-section-label">Class attributes</div>
+      <div class="traits-box">${attrs || '<div class="trait-row"><span class="tk">none recorded</span></div>'}</div>
+    </div>
+    <div>
+      <div class="dossier-section-label">Distinguishing marks</div>
+      <div class="traits-box">${marks || '<div class="trait-row"><span class="tk">none recorded</span></div>'}</div>
+    </div>
+    <div>
+      <div class="dossier-section-label">Profile updates (all gated + reversible)</div>
+      <table class="dossier-table">${updates || '<tr><td>none — the gate has not opened</td></tr>'}</table>
+    </div>
+    <div class="dossier-audit">
+      <div class="dossier-audit-head"><span>AUDIT</span>
+        <button class="link-btn" onclick="document.getElementById('audit-drawer').classList.remove('hidden')">view full chain ▸</button></div>
+      ${model3d.exists ? `<div class="dossier-audit-entry"><a href="${model3d.exports.splat}" style="color:var(--accent)">model.splat</a> · <a href="${model3d.exports.provenance_ply}" style="color:var(--accent)">provenance .ply</a></div>` : ""}
+    </div>`;
+  showDossierView();
 }
 
-document.getElementById("dossier-close").onclick = () =>
-  document.getElementById("dossier").classList.add("hidden");
-document.getElementById("dossier").onclick = (e) => {
-  if (e.target.id === "dossier") e.currentTarget.classList.add("hidden");
-};
+document.getElementById("side-back").onclick = showTargetsView;
 
 /* ------------------------------------------------------------- flag form */
 
@@ -304,6 +445,7 @@ function connect() {
       latestSnapshot = msg.targets || {};
       renderTargetsOnMap(latestSnapshot);
       renderTargetList(latestSnapshot);
+      if (openDossierId && latestSnapshot[openDossierId]) openDossier(openDossierId);
     } else if (msg.type === "contact") {
       flashContact(msg);
     } else {
