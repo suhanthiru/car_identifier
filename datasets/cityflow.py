@@ -15,6 +15,7 @@ the corroboration fusion are validated. Presence-gated; see DATASETS.md.
 """
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -29,6 +30,25 @@ DEFAULT_FPS = 10.0
 # Real-graph windows get this much slack beyond the widest observed hop —
 # one measurement is not "the slowest this could ever be."
 REAL_WINDOW_BUFFER_S = 5.0
+
+# AIC22's own ReadMe.txt is explicit: "we do not have access to the exact
+# GPS location of each camera, the GPS location for the approximate center
+# of each scenario is provided" (cam_loc/<subset>.png captions). S03/S04/S05
+# share one composite map ("S0345.png") and therefore one center point.
+# These are the ONLY real georeferenced facts this release publishes.
+SCENARIO_CENTER_GPS: dict[str, tuple[float, float]] = {
+    "S01": (42.525678, -90.723601),
+    "S02": (42.491916, -90.723723),
+    "S03": (42.498780, -90.686393),
+    "S04": (42.498780, -90.686393),
+    "S05": (42.498780, -90.686393),
+    "S06": (42.492448, -90.723343),
+}
+# Individual camera positions inside a scenario are clustered within this
+# radius of the real center — plausible for an intersection-cluster camera
+# network, and small enough not to imply surveyed precision we don't have.
+CAMERA_CLUSTER_RADIUS_M = 120.0
+_METERS_PER_DEG_LAT = 111_320.0
 
 
 @dataclass(frozen=True)
@@ -83,8 +103,22 @@ class CityFlowScenario:
                         elapsed_s=round(gap, 2)))
         return tuple(out)
 
-    def camera_gps(self) -> dict[str, tuple[float, float]]:
-        """Approximate camera GPS: the homography image-center mapping."""
+    def center_gps(self) -> tuple[float, float] | None:
+        """The one real georeferenced fact AIC22 publishes for this scenario."""
+        return SCENARIO_CENTER_GPS.get(self.name)
+
+    def _camera_local_layout(self) -> dict[str, tuple[float, float]]:
+        """Relative camera layout from each homography's image-center mapping.
+
+        NOT real GPS — AIC22's own ReadMe says per-camera GPS isn't
+        published, only an approximate scenario-level center (see
+        `SCENARIO_CENTER_GPS`). The homography maps into some local
+        calibration frame of unknown scale/orientation, not WGS84 degrees;
+        the raw output is unusable as literal lat/lon (values far outside
+        valid ranges). It still carries real, if uncalibrated-to-Earth,
+        relative-position information between cameras in the same scenario,
+        which `camera_gps()` turns into an honest approximate placement.
+        """
         out = {}
         for cam, H in self.homographies.items():
             pt = H @ np.array([960.0, 540.0, 1.0])
@@ -92,30 +126,65 @@ class CityFlowScenario:
                 out[cam] = (float(pt[0] / pt[2]), float(pt[1] / pt[2]))
         return out
 
+    def camera_gps(self) -> dict[str, tuple[float, float]]:
+        """Approximate per-camera GPS: real scenario center + relative layout.
+
+        Not surveyed positions. Recenters the homography's relative local
+        layout on this scenario's real, dataset-documented center point and
+        scales it to fit within `CAMERA_CLUSTER_RADIUS_M` of that point —
+        preserving real relative geometry (which camera is where relative
+        to the others) while never claiming precision the dataset doesn't
+        publish. Empty if the scenario has no real center on record or no
+        calibrated cameras.
+        """
+        center = self.center_gps()
+        local = self._camera_local_layout()
+        if center is None or not local:
+            return {}
+        cams = sorted(local)
+        xs = np.array([local[c][0] for c in cams])
+        ys = np.array([local[c][1] for c in cams])
+        xs, ys = xs - xs.mean(), ys - ys.mean()
+        radius = float(np.hypot(xs, ys).max())
+        scale = (CAMERA_CLUSTER_RADIUS_M / radius) if radius > 1e-9 else 0.0
+        lat0, lon0 = center
+        lon_scale = _METERS_PER_DEG_LAT * math.cos(math.radians(lat0))
+        out = {}
+        for cam, x, y in zip(cams, xs * scale, ys * scale):
+            out[cam] = (
+                lat0 + float(y) / _METERS_PER_DEG_LAT,
+                lon0 + float(x) / lon_scale,
+            )
+        return out
+
     def to_road_graph(self, road_factor: float = 1.0) -> RoadGraph:
         """A REAL, reasoning-capable RoadGraph built from this scenario.
 
-        Camera positions come from `camera_gps()` — real, but approximate
-        (the homography's image-center mapping, not a surveyed point).
-        Transit windows come from ACTUALLY OBSERVED ground-truth vehicle
-        hops (`transitions()`), unlike the synthetic world's
+        Camera positions come from `camera_gps()` — clustered around this
+        scenario's real, dataset-documented center point (the only GPS
+        AIC22 actually publishes), using the calibration homography only
+        for real *relative* layout, never claiming surveyed per-camera
+        precision. Transit windows come from ACTUALLY OBSERVED ground-truth
+        vehicle hops (`transitions()`), unlike the synthetic world's
         `sim.road_graph.make_edge`, which derives windows from a guessed
         speed envelope. A camera pair with only one observed hop gets a
-        wide window padded around it (one measurement is not "the fastest
-        possible"); a pair with several gets [min, median, max] as the
-        real population implies. Camera pairs with zero observed
+        wide window padded around it (one measurement is not "the slowest
+        this could ever be"); a pair with several gets [min, median, max]
+        as the real population implies. Camera pairs with zero observed
         transitions get no edge at all — `min_transit_s` returns None
         between them rather than a fabricated guess.
 
         This is what makes the operator console's map "automatically look
-        real" honest: the graph really is built from real camera
-        positions and real observed travel times, not our own fiction.
+        real" honest: the graph is built from a real place and real
+        observed travel times, with camera micro-positions honestly
+        approximated rather than fabricated wholesale like the synthetic
+        world's fictional Gridville.
         """
         gps = self.camera_gps()
         if not gps:
             raise ValueError(
-                f"scenario {self.name} has no usable camera calibration; "
-                f"cannot place cameras without real GPS")
+                f"scenario {self.name} has no usable camera calibration and/or "
+                f"no documented real center; cannot place cameras honestly")
         cameras = tuple(
             CameraSpec(camera_id=cam, name=cam, lat=lat, lon=lon)
             for cam, (lat, lon) in sorted(gps.items())

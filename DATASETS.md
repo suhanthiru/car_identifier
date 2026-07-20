@@ -77,6 +77,19 @@ CityFlow/
 └── validation/ ...
 ```
 
+- **Honesty note on camera GPS**: AIC22's own ReadMe.txt states individual
+  per-camera GPS is *not* published — only one approximate center point per
+  scenario (`cam_loc/<subset>.png`; S03/S04/S05 share one). The
+  `calibration.txt` homography maps image pixels into a local calibration
+  frame, not WGS84 degrees — using its raw output as literal lat/lon
+  produces nonsense coordinates. `datasets/cityflow.py`'s `camera_gps()`
+  recenters that homography's real *relative* camera layout around each
+  scenario's real documented center point instead, so cameras land in the
+  right real neighborhood without claiming surveyed per-camera precision
+  the dataset doesn't have. The transit-time veto and corroboration
+  numbers in RESULTS.md never depend on this — they come from real
+  observed elapsed times between ground-truth track hops, not coordinates.
+
 ## Optional: VeRi-Wild
 
 Same request-form pattern (`github.com/PKU-IMRE/VERI-Wild`). Loader not built
