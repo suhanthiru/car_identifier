@@ -5,7 +5,9 @@ import cv2
 import numpy as np
 import pytest
 
-from datasets.cityflow_video import VideoFrameSource, bbox_for
+from datasets.cityflow_video import (
+    VideoFrameSource, bbox_for, discover_camera_dirs, vehicle_frame_spans,
+)
 
 FRAME_W, FRAME_H = 64, 48
 
@@ -70,3 +72,28 @@ def test_video_frame_source_missing_file_raises(tmp_path):
     src = VideoFrameSource(tmp_path / "nope.avi")
     with pytest.raises(FileNotFoundError):
         src.crop(0, (0, 0, 5, 5))
+
+
+def test_vehicle_frame_spans_first_and_last(tmp_path):
+    gt = tmp_path / "gt.txt"
+    make_gt(gt)  # vehicle 7 at frames 0 and 2; vehicle 9 at frame 2 only
+    spans = vehicle_frame_spans(gt)
+    assert spans[7] == (0, 2)
+    assert spans[9] == (2, 2)
+
+
+def test_discover_camera_dirs_finds_scenario_under_a_split(tmp_path):
+    root = tmp_path / "CityFlow"
+    cam_dir = root / "train" / "S01" / "c001"
+    (cam_dir / "gt").mkdir(parents=True)
+    (cam_dir / "gt" / "gt.txt").write_text("0,1,0,0,5,5,1,-1,-1,-1\n")
+    # A camera dir without gt.txt must not be picked up.
+    (root / "train" / "S01" / "c002").mkdir(parents=True)
+    dirs = discover_camera_dirs(root, "S01")
+    assert dirs == {"c001": cam_dir}
+
+
+def test_discover_camera_dirs_missing_scenario_returns_empty(tmp_path):
+    root = tmp_path / "CityFlow"
+    (root / "train").mkdir(parents=True)
+    assert discover_camera_dirs(root, "S99") == {}

@@ -16,6 +16,49 @@ from pathlib import Path
 import numpy as np
 
 
+def discover_camera_dirs(root: Path, scenario_name: str) -> dict[str, Path]:
+    """camera_id -> its directory (has gt/gt.txt + vdo.avi).
+
+    Mirrors `CityFlow.load_scenario()`'s directory discovery, duplicated
+    here rather than exposed on `CityFlowScenario` to avoid changing that
+    dataclass's stable, already-tested shape.
+    """
+    for split in sorted(p for p in root.iterdir() if p.is_dir()):
+        scen_dir = split / scenario_name
+        if not scen_dir.is_dir():
+            continue
+        return {
+            cam_dir.name: cam_dir
+            for cam_dir in sorted(scen_dir.glob("c*"))
+            if (cam_dir / "gt" / "gt.txt").exists()
+        }
+    return {}
+
+
+def vehicle_frame_spans(gt_path: Path) -> dict[int, tuple[int, int]]:
+    """vehicle_id -> (first_frame, last_frame), straight from raw gt.txt.
+
+    Independent of any seconds/offset conversion -- CityFlowFeed pairs this
+    with datasets/cityflow.py's TrackSpan (already offset-adjusted to the
+    scenario's shared clock) for the real timestamp of the same passage,
+    rather than trying to invert TrackSpan's seconds back into a frame
+    number, which would need the per-camera fps/offset all over again.
+    """
+    first: dict[int, int] = {}
+    last: dict[int, int] = {}
+    for line in gt_path.read_text().splitlines():
+        parts = line.replace(";", ",").split(",")
+        if len(parts) < 6:
+            continue
+        try:
+            frame, vid = int(parts[0]), int(parts[1])
+        except ValueError:
+            continue
+        first[vid] = min(first.get(vid, frame), frame)
+        last[vid] = max(last.get(vid, frame), frame)
+    return {vid: (first[vid], last[vid]) for vid in first}
+
+
 def bbox_for(gt_path: Path, frame: int, vehicle_id: int) -> tuple[int, int, int, int] | None:
     """(left, top, width, height) for one vehicle at one frame, or None."""
     for line in gt_path.read_text().splitlines():
