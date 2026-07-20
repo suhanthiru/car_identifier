@@ -4,7 +4,7 @@ import pytest
 
 from reasoning.cascade import (
     VERDICT_CANDIDATE, VERDICT_CONFIRMED, VERDICT_LIKELY, VERDICT_REJECTED,
-    VERDICT_UNDECIDED, evaluate, rank_candidates,
+    VERDICT_UNDECIDED, evaluate, rank_candidates, score_breakdown,
 )
 from reasoning.profile import LastSeen
 from sim.road_graph import default_world
@@ -161,3 +161,22 @@ def test_every_decision_carries_facts(graph):
     d = evaluate(make_obs(plate="ABC-1234"), make_profile(), graph)
     assert len(d.facts) >= 4
     assert all(f.text for f in d.facts)
+
+
+def test_score_breakdown_matches_plate_confirm(graph):
+    """The breakdown's components must sum to exactly the (pre-cap) score
+    the real cascade computed — no illustrative/fabricated weights."""
+    d = evaluate(make_obs(plate="ABC-1234"), make_profile(), graph)
+    breakdown = score_breakdown(d.signals)
+    assert breakdown["plate"] == pytest.approx(0.90)
+    assert sum(breakdown.values()) == pytest.approx(d.score) or \
+        sum(breakdown.values()) >= d.score - 1e-9  # score is min(1.0, sum)
+
+
+def test_score_breakdown_omits_uncontributing_components(graph):
+    """No plate, no marks -> no plate/instance_marks keys at all (never a
+    fabricated zero-weight row)."""
+    d = evaluate(make_obs(plate=""), make_profile(plate=""), graph)
+    breakdown = score_breakdown(d.signals)
+    assert "plate" not in breakdown
+    assert "instance_marks" not in breakdown

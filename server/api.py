@@ -420,6 +420,14 @@ def create_app(
 
     @app.get("/api/reviews")
     def list_reviews(status: str = "pending"):
+        from reasoning.cascade import score_breakdown
+
+        # Structured decision detail (signals, per-fact kind/check, real
+        # score breakdown, candidate_ids) lives only on the tracker's live
+        # in-memory PendingReview — ReviewRow only ever persisted flattened
+        # text. Enrich pending rows from there; once resolved a review has
+        # left that dict and the flattened DB fields are all that remain.
+        pending_by_id = {p.review_id: p for p in state.tracker.pending_reviews()}
         with Session(engine) as session:
             rows = session.exec(
                 select(dbm.ReviewRow).where(dbm.ReviewRow.status == status)
@@ -428,6 +436,8 @@ def create_app(
             for r in rows:
                 sighting = session.get(dbm.SightingRow, r.event_id)
                 target = session.get(dbm.TargetRow, r.target_id)
+                live = pending_by_id.get(r.review_id)
+                decision = live.decision if live else None
                 out.append({
                     **r.model_dump(),
                     "rivals": dbm.loads(r.rivals),
@@ -437,6 +447,15 @@ def create_app(
                     "reference_crop": (f"/api/crops/{target.reference_crop}"
                                        if target and target.reference_crop else ""),
                     "target_label": target.label if target else "",
+                    "structured_facts": (
+                        [{"kind": f.kind, "text": f.text, "check": f.check}
+                         for f in decision.facts] if decision else []),
+                    "signals": (dataclasses.asdict(decision.signals)
+                                if decision and decision.signals else None),
+                    "distinctiveness": decision.distinctiveness if decision else None,
+                    "candidate_ids": list(decision.candidate_ids) if decision else [],
+                    "score_breakdown": (score_breakdown(decision.signals)
+                                        if decision and decision.signals else {}),
                 })
             return out
 

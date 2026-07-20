@@ -143,6 +143,14 @@ def test_review_flow_accept(client):
     reviews = client.get("/api/reviews").json()
     assert len(reviews) == 1
     assert "[+]" in reviews[0]["facts"]
+    # A pending review is enriched from the live decision (not just the
+    # flattened DB text) with structured facts and a real weight breakdown.
+    assert reviews[0]["structured_facts"]
+    assert all({"kind", "text", "check"} <= f.keys()
+               for f in reviews[0]["structured_facts"])
+    assert reviews[0]["signals"] is not None
+    assert reviews[0]["distinctiveness"] is not None
+    assert isinstance(reviews[0]["score_breakdown"], dict)
 
     resolve = client.post(f"/api/reviews/{reviews[0]['review_id']}/resolve",
                           json={"accept": True})
