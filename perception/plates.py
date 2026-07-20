@@ -18,6 +18,7 @@ the identity cascade to fall through to weaker evidence tiers.
 from __future__ import annotations
 
 import random
+import threading
 from dataclasses import dataclass
 
 import numpy as np
@@ -71,9 +72,20 @@ class FastPlateOcrReader:
     def __init__(self, model_name: str = "european-plates-mobile-vit-v2-model"):
         self._model_name = model_name
         self._engine = None
+        self._load_lock = threading.Lock()
 
     def _load(self):
-        if self._engine is None:
+        # Double-checked lock: server/real_feed.py's concurrent per-camera
+        # edge tasks share one RealPerceptor, and thus one reader, each
+        # calling .read() via asyncio.to_thread -- the first plate read on
+        # each of several concurrent real threads would otherwise race to
+        # download/construct the ONNX session simultaneously (the same
+        # failure mode ReidEmbedder._load() already guards against).
+        if self._engine is not None:
+            return self._engine
+        with self._load_lock:
+            if self._engine is not None:
+                return self._engine
             try:
                 from fast_plate_ocr import ONNXPlateRecognizer
             except ImportError as exc:  # pragma: no cover
