@@ -59,6 +59,17 @@ def test_world_source_defaults_synthetic(client):
     assert client.get("/api/world_source").json() == {"source": "synthetic"}
 
 
+def test_pipeline_config_defaults_on_and_round_trips(client):
+    assert client.get("/api/pipeline_config").json() == {"plate_ocr": True}
+    resp = client.post("/api/pipeline_config", json={"plate_ocr": False})
+    assert resp.json() == {"plate_ocr": False}
+    assert client.get("/api/pipeline_config").json() == {"plate_ocr": False}
+    # Flip back on, and omitting the field must leave the toggle unchanged.
+    client.post("/api/pipeline_config", json={"plate_ocr": True})
+    client.post("/api/pipeline_config", json={})
+    assert client.get("/api/pipeline_config").json() == {"plate_ocr": True}
+
+
 def test_world_source_can_be_set_real(tmp_path):
     from server.api import create_app
 

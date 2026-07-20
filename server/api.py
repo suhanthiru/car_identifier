@@ -34,8 +34,8 @@ from perception.types import Observation, PlateRead
 from reasoning.profile import profile_from_flag
 from server import db as dbm
 from server.schemas import (
-    FlagTargetRequest, InspectRequest, ProfileEditRequest, ReviewResolution,
-    SightingReport,
+    FlagTargetRequest, InspectRequest, PipelineConfigRequest, ProfileEditRequest,
+    ReviewResolution, SightingReport,
 )
 from server.ws import ConnectionManager
 from sim.road_graph import RoadGraph, default_world
@@ -52,6 +52,7 @@ def create_app(
     enable_3d: bool | None = None,
     targets3d_dir: str = "data/targets3d",
     world_source: str = "synthetic",
+    enable_plate_ocr: bool = True,
 ) -> FastAPI:
     """enable_3d: build/maintain a cargen 3D model per target, fusing crops
     only on gated (plate/operator-confirmed) updates. Off by default: the
@@ -106,6 +107,11 @@ def create_app(
     state.enable_3d = enable_3d
     state.targets3d_dir = Path(targets3d_dir)
     state.world_source = world_source
+    # Real-clip mode only (perception/real_observe.py's RealPerceptor reads
+    # this per-call): whether plate OCR runs at all. Runtime-flippable via
+    # POST /api/pipeline_config so a single demo session can show both
+    # states, not just a startup flag.
+    state.enable_plate_ocr = enable_plate_ocr
     state.render_embedder = None       # lazy ReidEmbedder for render-and-compare
     _rc_path = Path("car3d/artifacts/render_compare.json")
     state.render_calibrator = None
@@ -530,6 +536,16 @@ def create_app(
         basemap tile layer under the camera pins. See create_app's
         world_source docstring for why these must never be mixed."""
         return {"source": state.world_source}
+
+    @app.get("/api/pipeline_config")
+    def pipeline_config_get():
+        return {"plate_ocr": state.enable_plate_ocr}
+
+    @app.post("/api/pipeline_config")
+    def pipeline_config_set(req: PipelineConfigRequest):
+        if req.plate_ocr is not None:
+            state.enable_plate_ocr = req.plate_ocr
+        return {"plate_ocr": state.enable_plate_ocr}
 
     # ---------------------------------------------------------- inspector
 

@@ -92,3 +92,10 @@ class InspectRequest(BaseModel):
     sighting: InspectSightingIn
     targets: list[InspectTargetIn] = Field(min_length=1, max_length=4)
     distinctiveness_floor: float | None = Field(default=None, ge=0.0, le=1.0)
+
+
+class PipelineConfigRequest(BaseModel):
+    """Runtime toggle for real-clip mode's plate OCR (see K's live console).
+    Only meaningful fields need be sent; omitted ones are left unchanged."""
+
+    plate_ocr: bool | None = None
