@@ -12,13 +12,14 @@ passage, replayed in real time-order.
 from __future__ import annotations
 
 import asyncio
+import base64
 from dataclasses import dataclass
 from pathlib import Path
 
 import httpx
 
 from datasets.cityflow import CityFlowScenario
-from datasets.cityflow_video import vehicle_frame_spans
+from datasets.cityflow_video import VideoFrameSource, bbox_for, vehicle_frame_spans
 from perception.real_observe import RealPerceptor
 from server.feed import observation_payload
 
@@ -60,6 +61,47 @@ def _passages_by_camera(
                 timestamp_s=(span.enter_s + span.exit_s) / 2))
         passages.sort(key=lambda p: p.timestamp_s)
         out[cam] = passages
+    return out
+
+
+def build_vehicle_index(
+    scenario: CityFlowScenario, camera_dirs: dict[str, Path],
+) -> list[dict]:
+    """One entry per vehicle in the scenario: its earliest camera/time and a
+    real thumbnail crop from that first appearance -- what lets an operator
+    browse and click "any car, arbitrarily" instead of typing an id."""
+    import cv2
+
+    earliest: dict[int, object] = {}
+    for span in scenario.spans:
+        cur = earliest.get(span.vehicle_id)
+        if cur is None or span.enter_s < cur.enter_s:
+            earliest[span.vehicle_id] = span
+
+    sources: dict[str, VideoFrameSource] = {}
+    out: list[dict] = []
+    for vid, span in sorted(earliest.items()):
+        thumb_b64 = ""
+        cam_dir = camera_dirs.get(span.camera_id)
+        if cam_dir is not None:
+            frames = vehicle_frame_spans(cam_dir / "gt" / "gt.txt")
+            fr = frames.get(vid)
+            if fr is not None:
+                bbox = bbox_for(cam_dir / "gt" / "gt.txt", fr[0], vid)
+                if bbox is not None:
+                    src = sources.setdefault(
+                        span.camera_id, VideoFrameSource(cam_dir / "vdo.avi"))
+                    crop = src.crop(fr[0], bbox)
+                    if crop is not None:
+                        ok, png = cv2.imencode(".png", crop)
+                        if ok:
+                            thumb_b64 = base64.b64encode(png.tobytes()).decode("ascii")
+        out.append({
+            "vehicle_id": vid, "first_camera": span.camera_id,
+            "first_time_s": span.enter_s, "thumbnail_b64": thumb_b64,
+        })
+    for src in sources.values():
+        src.close()
     return out
 
 

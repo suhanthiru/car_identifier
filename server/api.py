@@ -53,6 +53,8 @@ def create_app(
     targets3d_dir: str = "data/targets3d",
     world_source: str = "synthetic",
     enable_plate_ocr: bool = True,
+    cityflow_root: str | None = None,
+    cityflow_scenario_name: str | None = None,
 ) -> FastAPI:
     """enable_3d: build/maintain a cargen 3D model per target, fusing crops
     only on gated (plate/operator-confirmed) updates. Off by default: the
@@ -112,6 +114,23 @@ def create_app(
     # POST /api/pipeline_config so a single demo session can show both
     # states, not just a startup flag.
     state.enable_plate_ocr = enable_plate_ocr
+
+    # Real-clip mode only: the CityFlow scenario this server instance is
+    # actively replaying (server/real_feed.py), if any. Set once at
+    # startup by scripts/run_cityflow_console.py -- there is no live
+    # scenario-switching, only vehicle selection within the active one.
+    state.cityflow_root = Path(cityflow_root) if cityflow_root else None
+    state.cityflow_scenario = None
+    state.cityflow_camera_dirs = {}
+    state.cityflow_vehicle_index = None  # lazily built + cached
+    if cityflow_scenario_name and state.cityflow_root:
+        from datasets.cityflow import CityFlow
+        from datasets.cityflow_video import discover_camera_dirs
+
+        state.cityflow_scenario = CityFlow(state.cityflow_root).load_scenario(
+            cityflow_scenario_name)
+        state.cityflow_camera_dirs = discover_camera_dirs(
+            state.cityflow_root, cityflow_scenario_name)
     state.render_embedder = None       # lazy ReidEmbedder for render-and-compare
     _rc_path = Path("car3d/artifacts/render_compare.json")
     state.render_calibrator = None
@@ -546,6 +565,30 @@ def create_app(
         if req.plate_ocr is not None:
             state.enable_plate_ocr = req.plate_ocr
         return {"plate_ocr": state.enable_plate_ocr}
+
+    @app.get("/api/cityflow/scenarios")
+    def cityflow_scenarios():
+        """Every scenario in the dataset this server was pointed at, not
+        just the one actively replaying -- discovery only; only the active
+        scenario (below) can actually be browsed/flagged."""
+        from datasets.cityflow import CityFlow
+
+        if state.cityflow_root is None or not CityFlow.exists(state.cityflow_root):
+            return []
+        return CityFlow(state.cityflow_root).scenario_names()
+
+    @app.get("/api/cityflow/{scenario}/vehicles")
+    def cityflow_vehicles(scenario: str):
+        if state.cityflow_scenario is None or scenario != state.cityflow_scenario.name:
+            raise HTTPException(
+                404, f"scenario {scenario!r} is not the active real-data scenario "
+                     f"({state.cityflow_scenario.name if state.cityflow_scenario else 'none loaded'})")
+        if state.cityflow_vehicle_index is None:
+            from server.real_feed import build_vehicle_index
+
+            state.cityflow_vehicle_index = build_vehicle_index(
+                state.cityflow_scenario, state.cityflow_camera_dirs)
+        return state.cityflow_vehicle_index
 
     # ---------------------------------------------------------- inspector
 
