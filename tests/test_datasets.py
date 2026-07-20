@@ -99,8 +99,13 @@ def test_cityflow_spans_and_transitions(tmp_path):
     assert hop.elapsed_s == pytest.approx(8.0)
     # vehicle 9 appears at one camera only: no transitions
     assert not [t for t in trans if t.vehicle_id == 9]
+    # Both fixture cameras share one homography, so their (degenerate,
+    # identical) local layout collapses to the scenario's real documented
+    # center — camera_gps() never fabricates per-camera lat/lon from the
+    # homography's raw (non-georeferenced) output. See DATASETS.md.
     gps = scen.camera_gps()
-    assert gps["c001"] == pytest.approx((960 + 42.5, 540 - 90.25))
+    assert gps["c001"] == pytest.approx((42.525678, -90.723601))
+    assert gps["c002"] == pytest.approx((42.525678, -90.723601))
 
 
 def test_cityflow_applies_camera_timing_offsets(tmp_path):
