@@ -94,6 +94,27 @@ body {
   font-size: 11px; font-weight: 600; letter-spacing: .06em; color: var(--dim);
 }
 
+.panel-subhead {
+  font-size: 9.5px; color: var(--dim); letter-spacing: .05em;
+  text-transform: uppercase; margin-bottom: 8px; display: flex;
+  align-items: center; gap: 6px;
+}
+.vehicle-grid {
+  display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-bottom: 14px;
+}
+.vehicle-tile {
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: 4px;
+  overflow: hidden; cursor: pointer; text-align: center;
+}
+.vehicle-tile:hover { border-color: var(--accent); }
+.vehicle-tile img {
+  width: 100%; height: 44px; object-fit: cover; display: block;
+  image-rendering: pixelated; background: #0c1116;
+}
+.vehicle-tile .vt-label {
+  font-family: Consolas, monospace; font-size: 9px; color: var(--dim); padding: 2px;
+}
+
 #flag-form { display: flex; flex-direction: column; gap: 6px; }
 #flag-form input, #flag-form select {
   background: var(--panel-2); border: 1px solid var(--line);
