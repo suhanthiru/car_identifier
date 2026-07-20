@@ -82,3 +82,18 @@ def test_veto_flags_specific(graph):
     assert s.body_veto and s.any_veto
     s2 = compute_signals(make_obs(plate="XYZ-9999", plate_conf=0.95), make_profile(), graph)
     assert s2.plate_contradiction and s2.any_veto
+
+
+def test_plate_partial_match_signal_populated(graph):
+    s = compute_signals(make_obs(plate="ABC-1_34", plate_conf=0.95), make_profile(), graph)
+    assert s.plate_partial_match
+    assert not s.plate_exact and not s.plate_near and not s.plate_contradiction
+    assert s.plate_known_chars == 7
+    assert s.plate_total_chars == 8
+    assert not s.any_veto
+
+
+def test_plate_partial_match_with_contradiction_is_still_a_veto(graph):
+    s = compute_signals(make_obs(plate="ABC-1_99", plate_conf=0.95), make_profile(), graph)
+    assert not s.plate_partial_match
+    assert s.plate_contradiction and s.any_veto

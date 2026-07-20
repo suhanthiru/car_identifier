@@ -180,3 +180,14 @@ def test_score_breakdown_omits_uncontributing_components(graph):
     breakdown = score_breakdown(d.signals)
     assert "plate" not in breakdown
     assert "instance_marks" not in breakdown
+
+
+def test_partial_plate_read_contributes_less_than_a_full_near_miss(graph):
+    """A real ALPR partial read is weighed on a gradient, not collapsed to
+    read/no-read: more known characters -> more score, capped at what a
+    full near-miss (plate_near) is worth."""
+    mostly_read = evaluate(make_obs(plate="ABC-1_34", plate_conf=0.95), make_profile(), graph)
+    mostly_masked = evaluate(make_obs(plate="A______4", plate_conf=0.95), make_profile(), graph)
+    near_miss = evaluate(make_obs(plate="ABC-1Z34"), make_profile(), graph)
+    assert 0 < mostly_masked.score < mostly_read.score < near_miss.score
+    assert mostly_read.deciding_tier == "plate"

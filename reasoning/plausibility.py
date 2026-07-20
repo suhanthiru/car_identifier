@@ -34,6 +34,26 @@ def _char_diffs(a: str, b: str) -> list[tuple[str, str]] | None:
     return [(x, y) for x, y in zip(a, b) if x != y]
 
 
+def _partial_match(seen: str, want: str) -> tuple[int, int] | None:
+    """(known_chars, total_chars) if `seen` has >=1 unread ('_') position,
+    every OTHER position agrees with `want`, and at least one position is
+    actually known -- i.e. a real ALPR partial read that is consistent with
+    (but doesn't fully confirm) the target plate. None otherwise: full
+    reads, incomparable lengths, no mask at all, or a known-position
+    contradiction (which stays a contradiction/veto candidate, mask or not).
+    """
+    if len(seen) != len(want) or "_" not in seen:
+        return None
+    known = 0
+    for s, w in zip(seen, want):
+        if s == "_":
+            continue
+        if s != w:
+            return None
+        known += 1
+    return (known, len(seen)) if known else None
+
+
 def check_plate(obs: Observation, profile: TargetProfile) -> list[Fact]:
     if not profile.plate:
         return [info("Target plate is unknown; plate evidence unavailable.", "plate")]
@@ -50,6 +70,13 @@ def check_plate(obs: Observation, profile: TargetProfile) -> list[Fact]:
             f"Plate read {seen} is one OCR-confusable character off the "
             f"target plate {want} ({diffs[0][0]}<->{diffs[0][1]}); treated as a weak match.",
             "plate")]
+    partial = _partial_match(seen, want)
+    if partial is not None:
+        known, total = partial
+        return [support(
+            f"{known} of {total} characters read and consistent with the target "
+            f"plate {want}; {total - known} unreadable -- treated as a weak match, "
+            f"not a confirmation.", "plate")]
     if obs.plate.confidence >= PLATE_VETO_CONF:
         return [veto(
             f"Plate read {seen} (confidence {obs.plate.confidence:.2f}) "
