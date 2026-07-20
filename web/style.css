@@ -304,6 +304,27 @@ table.dossier-table td, table.dossier-table th {
 }
 table.dossier-table th { color: var(--dim); font-weight: 600; }
 
+/* ------------------------------------------------------ pipeline diagram */
+.pd-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.pd-node {
+  font-family: Consolas, monospace; font-size: 9.5px; letter-spacing: .03em;
+  color: var(--dim); background: var(--panel-2); border: 1px solid var(--line);
+  border-radius: 4px; padding: 4px 8px; position: relative; white-space: nowrap;
+}
+.pd-arrow { color: var(--dim); font-size: 11px; }
+.pd-node.pd-off { opacity: .5; border-style: dashed; }
+.pd-badge {
+  margin-left: 5px; font-size: 8px; font-weight: 700; color: var(--veto);
+  border: 1px solid var(--veto); border-radius: 3px; padding: 0 3px;
+}
+.pd-node.pd-deciding {
+  color: var(--accent); border-color: var(--accent); background: rgba(77,163,255,.12);
+}
+#pipeline-strip {
+  flex: none; padding: 6px 16px; background: var(--panel);
+  border-bottom: 1px solid var(--line);
+}
+
 .cam-label {
   background: none; border: none; box-shadow: none;
   color: var(--dim); font-size: 10px; font-weight: 600;

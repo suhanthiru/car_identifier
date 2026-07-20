@@ -75,7 +75,21 @@ async function initMap() {
   document.getElementById("tb-cameras").textContent = `${cameras.length}/${cameras.length} CAMERAS`;
   document.getElementById("tb-subtitle").textContent =
     worldSource.source === "real" ? "REAL-DATA CONSOLE" : "SYNTHETIC RESEARCH CONSOLE";
-  if (worldSource.source === "real") initCityflowVehicleBrowser();
+  if (worldSource.source === "real") {
+    initCityflowVehicleBrowser();
+    initPipelineStrip();
+  }
+}
+
+async function initPipelineStrip() {
+  const strip = document.getElementById("pipeline-strip");
+  const refresh = async () => {
+    const cfg = await api("/api/pipeline_config").catch(() => ({ plate_ocr: true }));
+    renderPipelineDiagram(strip, { plateOcrEnabled: cfg.plate_ocr });
+  };
+  strip.classList.remove("hidden");
+  await refresh();
+  setInterval(refresh, 5000);
 }
 
 async function initCityflowVehicleBrowser() {
