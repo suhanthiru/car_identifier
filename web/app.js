@@ -69,12 +69,46 @@ async function initMap() {
   ]);
   cameraMarkers = renderRoadMap(map, cameras, adjacency, worldSource.source).cameraMarkers;
   map.fitBounds(cameras.map((c) => [c.lat, c.lon]), { padding: [46, 46] });
-  // Cameras in this world never go offline mid-run (synthetic) or don't yet
-  // have a live health feed (real/CityFlow, pre-K) -- report the honest
-  // "all present" count rather than fabricating a partial online figure.
+  // Cameras in this world never go offline mid-run (synthetic) and there is
+  // no per-camera live health feed for real mode either -- report the
+  // honest "all present" count rather than fabricating a partial figure.
   document.getElementById("tb-cameras").textContent = `${cameras.length}/${cameras.length} CAMERAS`;
   document.getElementById("tb-subtitle").textContent =
     worldSource.source === "real" ? "REAL-DATA CONSOLE" : "SYNTHETIC RESEARCH CONSOLE";
+  if (worldSource.source === "real") initCityflowVehicleBrowser();
+}
+
+async function initCityflowVehicleBrowser() {
+  const section = document.getElementById("cityflow-vehicles-section");
+  const scenarios = await api("/api/cityflow/scenarios").catch(() => []);
+  if (!scenarios.length) return;
+  const scenario = scenarios[0];
+  const vehicles = await api(`/api/cityflow/${scenario}/vehicles`).catch(() => []);
+  if (!vehicles.length) return;
+  document.getElementById("cityflow-scenario-tag").textContent = scenario;
+  document.getElementById("flag-section").classList.add("hidden");
+  section.classList.remove("hidden");
+  const grid = document.getElementById("cityflow-vehicles");
+  grid.innerHTML = "";
+  vehicles.forEach((v) => {
+    const tile = document.createElement("div");
+    tile.className = "vehicle-tile";
+    const img = v.thumbnail_b64
+      ? `<img src="data:image/png;base64,${v.thumbnail_b64}" alt="vehicle ${v.vehicle_id}">`
+      : `<div class="no-crop">no thumbnail</div>`;
+    tile.innerHTML = `${img}<div class="vt-label">#${escapeHtml(String(v.vehicle_id))} · ${escapeHtml(v.first_camera)} · t+${Math.round(v.first_time_s)}s</div>`;
+    tile.onclick = () => flagCityflowVehicle(v);
+    grid.appendChild(tile);
+  });
+}
+
+async function flagCityflowVehicle(v) {
+  await api("/api/targets", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      label: `vehicle ${v.vehicle_id} (real, first seen ${v.first_camera})`,
+    }),
+  });
 }
 
 function flashContact(msg) {
