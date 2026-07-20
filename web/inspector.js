@@ -309,13 +309,29 @@ function signalsTableHtml(signals) {
   return `<table class="signals-table">${rows}</table>`;
 }
 
+const VERDICT_ICON = {
+  confirmed: "✓", likely: "◐", candidate: "△", rejected: "✕", undecided: "?",
+};
+const VERDICT_TITLE = {
+  confirmed: "MATCH CONFIRMED", likely: "LIKELY MATCH", candidate: "CANDIDATE SET",
+  rejected: "REJECTED", undecided: "UNDECIDED",
+};
+
 function decisionCardHtml(d, isBest, floor) {
   const distPct = Math.round(Math.max(0, Math.min(1, d.distinctiveness)) * 100);
   const floorPct = Math.round(Math.max(0, Math.min(1, floor)) * 100);
+  const heroHtml = isBest ? `
+    <div class="verdict-hero verdict-${d.verdict}">
+      <div class="vh-icon">${VERDICT_ICON[d.verdict] || "?"}</div>
+      <div class="vh-label">${VERDICT_TITLE[d.verdict] || d.verdict.toUpperCase()}</div>
+      <div class="vh-conf">confidence ${Math.round(Math.min(1, d.score) * 100)}%</div>
+    </div>` : "";
   const cfHtml = d.counterfactuals.length ? `
     <div class="counterfactuals">
-      <div class="cf-label">What would change the outcome</div>
-      ${d.counterfactuals.map((c) => `<div class="cf">&rarr; ${escapeHtml(c.text)}</div>`).join("")}
+      <div class="cf-label">What would flip the verdict</div>
+      ${d.counterfactuals.map((c, i) => `
+        <div class="cf"><span class="cf-text">&rarr; ${escapeHtml(c.text)}</span>
+        <button class="cf-try" data-target-id="${escapeHtml(d.target_id)}" data-cf-idx="${i}">try it</button></div>`).join("")}
     </div>` : "";
   const candidateIds = d.candidate_ids || [];
   const candidateHtml = d.refused_to_individuate ? `
@@ -323,6 +339,7 @@ function decisionCardHtml(d, isBest, floor) {
       <b>${escapeHtml(candidateIds.length ? candidateIds.join(", ") : d.target_id)}</b></div>` : "";
   return `
     <div class="decision-card verdict-${d.verdict}${isBest ? " is-best" : ""}">
+      ${heroHtml}
       <div class="decision-head">
         <span class="title">${escapeHtml(d.label)}${isBest ? " &#9733;" : ""}</span>
         <span class="verdict-badge verdict-${d.verdict}">${escapeHtml(d.verdict)}</span>
@@ -336,17 +353,67 @@ function decisionCardHtml(d, isBest, floor) {
       </div>
       <div class="hint">distinctiveness ${d.distinctiveness.toFixed(2)} (floor ${floor.toFixed(2)})</div>
       <div class="dist-meter">
+        <div class="below-floor" style="width:${floorPct}%"></div>
         <div class="fill" style="width:${distPct}%"></div>
         <div class="floor-mark" style="left:${floorPct}%"></div>
       </div>
+      <div class="dist-meter-scale"><span>0</span>
+        <span class="floor-label">refusal floor · ${floor.toFixed(2)}</span><span>1.0</span></div>
       ${candidateHtml}
       <div class="facts">${factsHtml(d.facts)}</div>
       ${cfHtml}
-      <details class="signals-detail">
-        <summary>raw signals (${Object.keys(d.signals || {}).length} fields)</summary>
-        ${signalsTableHtml(d.signals)}
-      </details>
+      <div class="signals-section-label">Raw structured signals</div>
+      ${signalsTableHtml(d.signals)}
     </div>`;
+}
+
+let lastDecisionsByTarget = {};   // target_id -> decision, for the "try it" adapter
+
+/* Maps a Counterfactual.signal to the concrete form field it perturbs, then
+   re-evaluates for real -- clicking "try it" mutates the actual sandbox
+   inputs and re-runs the real cascade, it does not fake a preview. Each
+   counterfactual only describes ONE signal's flip in isolation (see
+   reasoning/counterfactual.py's docstring), so this only ever changes the
+   one field responsible for that signal. */
+function applyCounterfactual(targetId, cfIdx) {
+  const decision = lastDecisionsByTarget[targetId];
+  const cf = decision && decision.counterfactuals[cfIdx];
+  const div = document.querySelector(`.target-form[data-target-id="${targetId}"]`);
+  if (!cf || !div) return;
+
+  if (cf.signal === "plate" || cf.signal === "distinctiveness") {
+    const sightingPlate = document.getElementById("s-plate");
+    const targetPlateEl = div.querySelector(".t-plate");
+    if (sightingPlate.value.trim() && cf.boundary === "plate match removed") {
+      sightingPlate.value = "";
+    } else {
+      // The target profile itself may have no plate on file (e.g. the
+      // "refused to individuate" preset) -- give it one so "a plate read
+      // would individuate" is actually demonstrable, not a no-op.
+      const plate = targetPlateEl.value.trim() || "ABC-1234";
+      targetPlateEl.value = plate;
+      sightingPlate.value = plate;
+      document.getElementById("s-plate-conf").value = "0.95";
+    }
+  } else if (cf.signal === "transit") {
+    const fastest = parseFloat((/=\s*([\d.]+)s/.exec(cf.boundary) || [])[1]);
+    const lastTime = parseFloat(div.querySelector(".t-last-time").value || "");
+    if (!Number.isNaN(fastest) && !Number.isNaN(lastTime)) {
+      const margin = 5;
+      const wasVetoed = cf.current_outcome === "rejected";
+      // Currently vetoed (too fast) -> give it more time than the physical
+      // minimum; currently accepted -> make it faster than that minimum.
+      document.getElementById("s-time").value =
+        wasVetoed ? lastTime + fastest + margin : lastTime + Math.max(0, fastest - margin);
+    }
+  } else if (cf.signal === "body_style") {
+    const bodyEl = document.getElementById("s-body");
+    const targetBody = div.querySelector(".t-body").value.trim();
+    const mismatchValue = targetBody.toLowerCase() === "sedan" ? "hatchback" : "sedan";
+    bodyEl.value = bodyEl.value.trim() === targetBody ? mismatchValue : targetBody;
+  }
+  updateStage();
+  evaluate();
 }
 
 async function evaluate() {
@@ -376,10 +443,15 @@ async function evaluate() {
   document.getElementById("results-empty").classList.add("hidden");
   const floor = body.distinctiveness_floor;
   try {
+    lastDecisionsByTarget = {};
+    result.all_decisions.forEach((d) => { lastDecisionsByTarget[d.target_id] = d; });
     const marginNote = result.all_decisions.length > 1
       ? `<div class="margin-note">margin between top two candidates: ${result.margin.toFixed(3)}</div>` : "";
     resultsEl.innerHTML = marginNote +
       result.all_decisions.map((d) => decisionCardHtml(d, d.target_id === result.best.target_id, floor)).join("");
+    resultsEl.querySelectorAll(".cf-try").forEach((btn) => {
+      btn.onclick = () => applyCounterfactual(btn.dataset.targetId, parseInt(btn.dataset.cfIdx, 10));
+    });
     updateStage(VERDICT_HEX[result.best.verdict] || null);
   } catch (e) {
     // A render bug must be visible, not a silently stale panel from the
