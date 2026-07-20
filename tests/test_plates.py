@@ -1,5 +1,7 @@
 """FastPlateOcrReader: masked-character preservation + completeness-derived
 confidence. SimulatedPlateReader is exercised via reasoning/cascade tests."""
+import threading
+import time
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -53,3 +55,33 @@ def test_fully_masked_read_returns_none():
 def test_no_read_returns_none():
     reader = _reader_with_mocked_engine([])
     assert reader.read(np.zeros((20, 60, 3), dtype=np.uint8)) is None
+
+
+def test_concurrent_first_reads_construct_the_engine_only_once():
+    """Regression: server/real_feed.py's concurrent per-camera edge tasks
+    share one RealPerceptor (and thus one FastPlateOcrReader), each calling
+    .read() via asyncio.to_thread. Without a lock around lazy engine
+    construction, several real threads racing to build it on their first
+    call could each try to load/construct it simultaneously."""
+    reader = FastPlateOcrReader()
+    build_count = 0
+    build_lock = threading.Lock()
+
+    class _SlowEngine:
+        def __init__(self, *args, **kwargs):
+            nonlocal build_count
+            with build_lock:
+                build_count += 1
+            time.sleep(0.05)  # widen the race window
+
+        def run(self, gray):
+            return ["ABC1234"]
+
+    with patch("fast_plate_ocr.ONNXPlateRecognizer", side_effect=_SlowEngine):
+        crop = np.zeros((20, 60, 3), dtype=np.uint8)
+        threads = [threading.Thread(target=reader.read, args=(crop,)) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+    assert build_count == 1
