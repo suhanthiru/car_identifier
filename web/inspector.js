@@ -325,7 +325,8 @@ function decisionCardHtml(d, isBest, floor) {
       <div class="vh-icon">${VERDICT_ICON[d.verdict] || "?"}</div>
       <div class="vh-label">${VERDICT_TITLE[d.verdict] || d.verdict.toUpperCase()}</div>
       <div class="vh-conf">confidence ${Math.round(Math.min(1, d.score) * 100)}%</div>
-    </div>` : "";
+    </div>
+    <div class="pd-mount" data-tier="${escapeHtml(d.deciding_tier)}" style="margin-bottom:10px"></div>` : "";
   const cfHtml = d.counterfactuals.length ? `
     <div class="counterfactuals">
       <div class="cf-label">What would flip the verdict</div>
@@ -451,6 +452,9 @@ async function evaluate() {
       result.all_decisions.map((d) => decisionCardHtml(d, d.target_id === result.best.target_id, floor)).join("");
     resultsEl.querySelectorAll(".cf-try").forEach((btn) => {
       btn.onclick = () => applyCounterfactual(btn.dataset.targetId, parseInt(btn.dataset.cfIdx, 10));
+    });
+    resultsEl.querySelectorAll(".pd-mount").forEach((mount) => {
+      renderPipelineDiagram(mount, { decidingTier: mount.dataset.tier });
     });
     updateStage(VERDICT_HEX[result.best.verdict] || null);
   } catch (e) {
