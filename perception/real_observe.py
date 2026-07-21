@@ -19,7 +19,11 @@ from datasets.cityflow_video import VideoFrameSource, bbox_for
 from perception.attributes import estimate_color
 from perception.embedder import ReidEmbedder
 from perception.plates import FastPlateOcrReader
-from perception.types import SOURCE_HEURISTIC, Observation
+from perception.types import CLIP_FRAMES, SOURCE_HEURISTIC, Observation
+
+# Frames between the sampled clip frames. At CityFlow's ~10fps a step of 6
+# spans roughly +/-1.5s of real footage across CLIP_FRAMES samples.
+CLIP_FRAME_STEP = 6
 
 
 class RealPerceptor:
@@ -60,18 +64,43 @@ class RealPerceptor:
     def _plate_ocr_enabled(self) -> bool:
         return bool(getattr(self._pipeline_state, "enable_plate_ocr", True))
 
+    def _clip_frames(
+        self, camera_id: str, vehicle_id: int, center_frame: int, gt_path: Path,
+    ) -> tuple[np.ndarray, ...]:
+        """A short clip of the real vehicle around this passage: CLIP_FRAMES
+        real frames sampled every CLIP_FRAME_STEP, each cropped by its own
+        ground-truth box. Frames with no box (vehicle out of view) are
+        skipped, so the clip may be shorter than CLIP_FRAMES near a track's
+        start/end. Reuses the one shared VideoFrameSource capture handle."""
+        source = self._video_source(camera_id)
+        half = CLIP_FRAMES // 2
+        frames: list[np.ndarray] = []
+        for i in range(CLIP_FRAMES):
+            f = center_frame + (i - half) * CLIP_FRAME_STEP
+            if f < 0:
+                continue
+            bbox = bbox_for(gt_path, f, vehicle_id)
+            if bbox is None:
+                continue
+            crop = source.crop(f, bbox)
+            if crop is not None and crop.size:
+                frames.append(crop)
+        return tuple(frames)
+
     def process(
         self, camera_id: str, vehicle_id: int, frame: int, timestamp_s: float,
     ) -> Observation | None:
         cam_dir = self._camera_dirs.get(camera_id)
         if cam_dir is None:
             return None
-        bbox = bbox_for(cam_dir / "gt" / "gt.txt", frame, vehicle_id)
+        gt_path = cam_dir / "gt" / "gt.txt"
+        bbox = bbox_for(gt_path, frame, vehicle_id)
         if bbox is None:
             return None
         crop = self._video_source(camera_id).crop(frame, bbox)
         if crop is None or crop.size == 0:
             return None
+        clip_frames = self._clip_frames(camera_id, vehicle_id, frame, gt_path)
 
         embedding = self._embedder.embed(crop)
         color = estimate_color(crop)
@@ -92,7 +121,7 @@ class RealPerceptor:
             embedding=embedding, plate=plate,
             class_attrs={"color": color}, class_attrs_source=SOURCE_HEURISTIC,
             instance_attrs={}, detection_source="cityflow-gt",
-            crop=crop, eval_truth_id=str(vehicle_id))
+            crop=crop, clip_frames=clip_frames, eval_truth_id=str(vehicle_id))
 
     def close(self) -> None:
         for src in self._video_sources.values():

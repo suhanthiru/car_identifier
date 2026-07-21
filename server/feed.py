@@ -35,12 +35,17 @@ class FeedConfig:
 def observation_payload(obs: Observation, send_crop: bool = True) -> dict:
     """Serialize an Observation into the report_sighting body."""
     crop_b64 = ""
-    if send_crop and obs.crop is not None:
+    clip_b64: list[str] = []
+    if send_crop:
         import cv2
 
-        ok, png = cv2.imencode(".png", obs.crop)
-        if ok:
-            crop_b64 = base64.b64encode(png.tobytes()).decode("ascii")
+        def _encode(img):
+            ok, png = cv2.imencode(".png", img)
+            return base64.b64encode(png.tobytes()).decode("ascii") if ok else ""
+
+        if obs.crop is not None:
+            crop_b64 = _encode(obs.crop)
+        clip_b64 = [b for f in obs.clip_frames if (b := _encode(f))]
     return {
         "event_id": obs.event_id,
         "camera_id": obs.camera_id,
@@ -57,6 +62,7 @@ def observation_payload(obs: Observation, send_crop: bool = True) -> dict:
         "instance_attrs": dict(obs.instance_attrs),
         "detection_source": obs.detection_source,
         "crop_png_b64": crop_b64,
+        "clip_frames_b64": clip_b64,
         "eval_truth_id": obs.eval_truth_id,
     }
 

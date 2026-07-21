@@ -27,7 +27,7 @@ from perception.attributes import (
 from perception.detector import VehicleDetector
 from perception.embedder import ReidEmbedder
 from perception.plates import PlateNoiseConfig, SimulatedPlateReader
-from perception.types import SOURCE_HEURISTIC, Observation
+from perception.types import CLIP_FRAMES, SOURCE_HEURISTIC, Observation
 from sim.model import SightingEvent
 from sim.render import render_passage, render_vehicle_crop
 from sim.road_graph import RoadGraph
@@ -41,6 +41,7 @@ class PerceptionConfig:
     plate_noise: PlateNoiseConfig = field(default_factory=PlateNoiseConfig)
     attr_noise: AttributeNoiseConfig = field(default_factory=AttributeNoiseConfig)
     keep_crops: bool = True
+    clip_gap_s: float = 0.2   # spacing between the sighting-clip frames
     seed: int = 47
 
 
@@ -81,6 +82,18 @@ class Perceptor:
         class_attrs = perceive_class_attrs(event.truth, crop, event.event_id, cfg.attr_noise)
         instance_attrs = perceive_instance_attrs(event.truth, event.event_id, cfg.attr_noise)
 
+        # Short looping sighting clip: the same vehicle sprite re-rendered at
+        # successive moments of this passage. Frame 0 matches `crop` in the
+        # fast path (same call, same timestamp). Illustrative synthetic motion,
+        # honestly labeled as such in the UI.
+        clip_frames: tuple = ()
+        if cfg.keep_crops:
+            clip_frames = tuple(
+                render_vehicle_crop(
+                    event.truth, event.camera_id,
+                    event.timestamp_s + i * cfg.clip_gap_s)
+                for i in range(CLIP_FRAMES))
+
         return Observation(
             event_id=event.event_id,
             camera_id=event.camera_id,
@@ -94,5 +107,6 @@ class Perceptor:
             instance_attrs=instance_attrs,
             detection_source=detection_source,
             crop=crop if cfg.keep_crops else None,
+            clip_frames=clip_frames,
             eval_truth_id=event.truth.vehicle_id,
         )

@@ -34,13 +34,14 @@ def flag(client, **kw) -> str:
 
 
 def sighting(event_id="evt-1", camera_id="cam-ctr", t=1000.0, plate=PLATE,
-             seed=1, crop=False, **kw):
+             seed=1, crop=False, clip=0, **kw):
     body = {
         "event_id": event_id, "camera_id": camera_id, "timestamp_s": t,
         "lat": 40.73, "lon": -89.61,
         "embedding": [float(x) for x in unit_vec(seed, 16)],
         "class_attrs": dict(CAMRY), "instance_attrs": {},
         "crop_png_b64": base64.b64encode(TINY_PNG).decode() if crop else "",
+        "clip_frames_b64": [base64.b64encode(TINY_PNG).decode() for _ in range(clip)],
     }
     if plate:
         body["plate"] = {"text": plate, "confidence": 0.95, "source": "sim"}
@@ -144,6 +145,37 @@ def test_flag_and_confirm_flow(client):
     facts = dossier["corroboration_chain"][0]["facts"]
     assert "exactly matches" in facts, "plain-english facts must be persisted"
     assert dossier["reference_crop"] == "evt-1.png"
+
+
+def test_sighting_clip_frames_stored_and_on_dossier(client, tmp_path):
+    target_id = flag(client)
+    resp = client.post("/api/sightings", json=sighting(crop=True, clip=3))
+    assert resp.status_code == 202
+    crops = tmp_path / "crops"
+    for i in range(3):
+        assert (crops / f"evt-1.f{i}.png").is_file()
+    # Reference (targeting) clip surfaces on the dossier once associated.
+    dossier = client.get(f"/api/targets/{target_id}").json()
+    assert dossier["reference_clip"] == [
+        f"/api/crops/evt-1.f{i}.png" for i in range(3)]
+
+
+def test_review_exposes_sighting_clip(client):
+    flag(client, plate="", instance_attrs={"accessory": "roof rack"})
+    client.post("/api/sightings", json=sighting(
+        plate=None, instance_attrs={"accessory": "roof rack"}, crop=True, clip=2))
+    reviews = client.get("/api/reviews").json()
+    assert len(reviews) == 1
+    assert reviews[0]["sighting_clip"] == [
+        "/api/crops/evt-1.f0.png", "/api/crops/evt-1.f1.png"]
+
+
+def test_sighting_without_clip_exposes_empty_list(client):
+    flag(client, plate="", instance_attrs={"accessory": "roof rack"})
+    client.post("/api/sightings", json=sighting(
+        plate=None, instance_attrs={"accessory": "roof rack"}, crop=True))
+    reviews = client.get("/api/reviews").json()
+    assert reviews[0]["sighting_clip"] == []
 
 
 def test_review_flow_accept(client):
