@@ -44,6 +44,16 @@ from tracking.tracker import FleetTracker
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 
 
+def _clip_urls(row) -> list[str]:
+    """Ordered /api/crops URLs for a sighting row's saved clip frames (the
+    frames were written as '{event_id}.f{i}.png'). Empty when the row is
+    missing or was saved as a still only (clip_frame_count == 0)."""
+    if row is None or not row.clip_frame_count:
+        return []
+    return [f"/api/crops/{row.event_id}.f{i}.png"
+            for i in range(row.clip_frame_count)]
+
+
 def create_app(
     graph: RoadGraph | None = None,
     db_url: str = dbm.DEFAULT_DB_URL,
@@ -320,6 +330,13 @@ def create_app(
         with Session(engine) as session:
             row = session.get(dbm.TargetRow, target_id)
             reference_crop = row.reference_crop if row else ""
+            # "Targeting clip": the clip of the first sighting the tracker
+            # associated to this target (the same event that set
+            # reference_crop, named "{event_id}.png"). Empty until then.
+            reference_clip: list[str] = []
+            if reference_crop.endswith(".png"):
+                ref_row = session.get(dbm.SightingRow, reference_crop[:-len(".png")])
+                reference_clip = _clip_urls(ref_row)
             updates = [u.model_dump() for u in session.exec(
                 select(dbm.ProfileUpdateRow)
                 .where(dbm.ProfileUpdateRow.target_id == target_id)
@@ -343,6 +360,7 @@ def create_app(
             "instance_attrs": dict(tracked.profile.instance_attrs),
             "gallery_size": len(tracked.profile.gallery),
             "reference_crop": reference_crop,
+            "reference_clip": reference_clip,
             "live": snap,
             "profile_updates": updates,
             "corroboration_chain": chain,
@@ -408,6 +426,18 @@ def create_app(
             crop_name = f"{obs.event_id}.png"
             (state.crops_dir / crop_name).write_bytes(png)
 
+        # Short looping sighting clip, saved as sibling frames the review card
+        # flips through; reuses the same /api/crops server as the still.
+        clip_count = 0
+        for i, frame_b64 in enumerate(report.clip_frames_b64):
+            try:
+                frame_png = base64.b64decode(frame_b64, validate=True)
+            except binascii.Error as exc:
+                raise HTTPException(
+                    422, "clip_frames_b64 contains invalid base64") from exc
+            (state.crops_dir / f"{obs.event_id}.f{i}.png").write_bytes(frame_png)
+            clip_count += 1
+
         events = state.tracker.process_observation(obs)
         events += state.tracker.tick(state.sim_now)
         with Session(engine) as session:
@@ -420,7 +450,8 @@ def create_app(
                 class_attrs=dbm.dumps(dict(obs.class_attrs)),
                 instance_attrs=dbm.dumps(dict(obs.instance_attrs)),
                 detection_source=obs.detection_source,
-                crop_path=crop_name, truth_id=obs.eval_truth_id))
+                crop_path=crop_name, clip_frame_count=clip_count,
+                truth_id=obs.eval_truth_id))
             _persist_events(session, events, obs)
             _fuse_3d_for_events(events, session)
             _sync_target_rows(session)
@@ -469,6 +500,7 @@ def create_app(
                     "counterfactuals": dbm.loads(r.counterfactuals) or [],
                     "sighting_crop": (f"/api/crops/{sighting.crop_path}"
                                       if sighting and sighting.crop_path else ""),
+                    "sighting_clip": _clip_urls(sighting),
                     "reference_crop": (f"/api/crops/{target.reference_crop}"
                                        if target and target.reference_crop else ""),
                     "target_label": target.label if target else "",

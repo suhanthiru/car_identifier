@@ -83,4 +83,41 @@ def test_missing_camera_or_frame_returns_none(tmp_path, embedder):
     dirs = make_scenario_dir(tmp_path)
     perceptor = RealPerceptor(dirs, embedder=embedder, plate_reader=_StubPlateReader(None))
     assert perceptor.process("c999", vehicle_id=7, frame=0, timestamp_s=1.0) is None
+
+
+def test_clip_collapses_to_the_only_boxed_frame(tmp_path, embedder):
+    # Multi-frame video but a box at frame 0 only: the clip window skips the
+    # boxless frames and collapses to that one real crop -- honestly shorter,
+    # still a real ndarray. (Uses a multi-frame video so cv2 can seek.)
+    cam_dir = tmp_path / "c001"
+    (cam_dir / "gt").mkdir(parents=True)
+    (cam_dir / "gt" / "gt.txt").write_text("0,7,5,5,20,15,1,-1,-1,-1\n")
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    writer = cv2.VideoWriter(str(cam_dir / "vdo.avi"), fourcc, 10.0, (FRAME_W, FRAME_H))
+    for i in range(6):
+        writer.write(np.full((FRAME_H, FRAME_W, 3), 40 + i * 20, dtype=np.uint8))
+    writer.release()
+    perceptor = RealPerceptor({"c001": cam_dir}, embedder=embedder,
+                              plate_reader=_StubPlateReader(None))
+    obs = perceptor.process("c001", vehicle_id=7, frame=0, timestamp_s=1.0)
+    assert len(obs.clip_frames) == 1
+    assert all(isinstance(f, np.ndarray) and f.size for f in obs.clip_frames)
+
+
+def test_clip_samples_multiple_frames_across_the_passage(tmp_path, embedder):
+    cam_dir = tmp_path / "c001"
+    (cam_dir / "gt").mkdir(parents=True)
+    # Boxes at frames 0,6,12,18 — the clip window around center=18 samples
+    # these (offsets 0/6/12/18; 24/30 have no box and are skipped).
+    (cam_dir / "gt" / "gt.txt").write_text(
+        "\n".join(f"{f},7,5,5,20,15,1,-1,-1,-1" for f in (0, 6, 12, 18)))
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    writer = cv2.VideoWriter(str(cam_dir / "vdo.avi"), fourcc, 10.0, (FRAME_W, FRAME_H))
+    for i in range(20):
+        writer.write(np.full((FRAME_H, FRAME_W, 3), 40 + i * 8, dtype=np.uint8))
+    writer.release()
+    perceptor = RealPerceptor({"c001": cam_dir}, embedder=embedder,
+                              plate_reader=_StubPlateReader(None))
+    obs = perceptor.process("c001", vehicle_id=7, frame=18, timestamp_s=2.0)
+    assert len(obs.clip_frames) == 4
     assert perceptor.process("c001", vehicle_id=999, frame=0, timestamp_s=1.0) is None

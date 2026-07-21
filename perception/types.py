@@ -18,6 +18,11 @@ SOURCE_MODEL = "model"          # a real off-the-shelf model produced this
 SOURCE_HEURISTIC = "heuristic"  # simple real image processing (e.g. color)
 SOURCE_SIM = "sim"              # simulator-labeled ground truth w/ injected noise
 
+# How many frames make up the short looping sighting clip the console plays in
+# place of a single still. Shared so the synthetic and real perceptors agree on
+# length; each picks its own frame spacing (seconds vs frame-step).
+CLIP_FRAMES = 6
+
 
 @dataclass(frozen=True)
 class PlateRead:
@@ -57,6 +62,12 @@ class Observation:
     instance_attrs: Mapping[str, str]
     detection_source: str
     crop: np.ndarray | None = field(default=None, repr=False, compare=False)
+    # A short burst of BGR frames (car crops) for this same passage, oldest
+    # first — the console loops them as the sighting clip. The ACTUAL sighting
+    # (rendered passage in the synthetic world, real vdo.avi footage in
+    # CityFlow), never a prediction. Empty when clips are disabled.
+    clip_frames: tuple[np.ndarray, ...] = field(
+        default=(), repr=False, compare=False)
     # EVALUATION ONLY. The reasoning layer must never read this field —
     # it is the simulator's answer key, used to score decisions afterwards.
     eval_truth_id: str = ""

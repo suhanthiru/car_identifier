@@ -38,6 +38,9 @@ class SightingReport(BaseModel):
     instance_attrs: dict[str, str] = {}
     detection_source: str = "sim-fallback"
     crop_png_b64: str = ""
+    # Ordered base64 PNG frames of the short sighting clip (oldest first).
+    # Empty when clips are disabled; the console loops them in the card.
+    clip_frames_b64: list[str] = []
     # Simulator ground truth for the evaluation harness. A real edge node
     # would not send this; the serving path never reads it.
     eval_truth_id: str = ""

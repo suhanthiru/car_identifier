@@ -6,6 +6,7 @@ const STATE_COLORS = {
   tentative: "#e0a83c", confirmed: "#3ddc84", coasting: "#4da3ff", lost: "#77808c",
 };
 const TRAIL_LENGTH = 12;
+const CLIP_FRAME_MS = 120;   // ~8fps loop for the sighting clip player
 
 // Real weight constants (reasoning/weights.py) — never invented, so the
 // confidence-breakdown popover is honest rather than illustrative.
@@ -211,6 +212,50 @@ function renderTargetList(targets) {
   if (openDossierId && !targets[openDossierId]) showTargetsView();
 }
 
+/* ------------------------------------------------------ sighting clip player
+   A clip is served as ordered PNG frames (see server/api.py). We flip an
+   <img>'s src on a timer to loop it — no animated-image encoder, no new
+   dependency, works everywhere. attachClipPlayers() must run after each
+   innerHTML render (same pattern as .cf-try / .pd-mount wiring). */
+const activeClips = [];   // { el, timer } for cleanup across re-renders
+
+function clipPlayerHtml(frames, opts) {
+  const { still = "", label = "", empty = "no clip yet" } = opts || {};
+  const list = (frames && frames.length) ? frames : (still ? [still] : []);
+  if (!list.length) return `<div class="clip-player empty">${escapeHtml(empty)}</div>`;
+  const lbl = label ? `<span class="clip-label">${escapeHtml(label)}</span>` : "";
+  return `<div class="clip-player" data-frames='${JSON.stringify(list)}'>
+    <img src="${list[0]}" alt="${escapeHtml(label || "sighting clip")}">${lbl}</div>`;
+}
+
+function attachClipPlayers(root) {
+  // Prune timers whose player was removed by a previous re-render.
+  for (let k = activeClips.length - 1; k >= 0; k--) {
+    if (!document.body.contains(activeClips[k].el)) {
+      clearInterval(activeClips[k].timer);
+      activeClips.splice(k, 1);
+    }
+  }
+  root.querySelectorAll(".clip-player[data-frames]").forEach((el) => {
+    let frames;
+    try { frames = JSON.parse(el.getAttribute("data-frames")); } catch (e) { return; }
+    const img = el.querySelector("img");
+    if (!img || !frames || frames.length < 2) return;   // single frame = static
+    frames.forEach((src) => { const pre = new Image(); pre.src = src; });
+    let i = 0;
+    const timer = setInterval(() => {
+      i = (i + 1) % frames.length;
+      img.src = frames[i];
+    }, CLIP_FRAME_MS);
+    activeClips.push({ el, timer });
+  });
+}
+
+function sightingClipHtml(r) {
+  return clipPlayerHtml(r.sighting_clip, {
+    still: r.sighting_crop, label: "sighting", empty: "no clip" });
+}
+
 function reviewCardHtml(r) {
   const isAnomaly = r.kind === "anomaly";
   // Refusal-to-individuate (feature B) fires whenever the distinctiveness
@@ -230,13 +275,6 @@ function reviewCardHtml(r) {
         text: line.replace(/^\[[+X!i]\]\s*/, ""), check: "",
       }));
 
-  const sightingImg = r.sighting_crop
-    ? `<img src="${r.sighting_crop}" alt="sighting crop">`
-    : `<div class="no-crop">no crop</div>`;
-  const refImg = r.reference_crop
-    ? `<img src="${r.reference_crop}" alt="reference crop">`
-    : `<div class="no-crop">no reference yet</div>`;
-
   if (isAnomaly) {
     const headline = facts.find((f) => f.check === "transit" || f.kind === "veto") || facts[0];
     return `<div class="review-card anomaly-collapsed" data-review="${r.review_id}">
@@ -251,6 +289,7 @@ function reviewCardHtml(r) {
       `<div class="candidate-chip">${escapeHtml(c)}</div>`).join("");
     const note = facts.find((f) => f.check === "distinctiveness");
     return `<div class="review-card candidate" data-review="${r.review_id}">
+      <div class="rc-clip">${sightingClipHtml(r)}</div>
       <div class="candidate-badge">CANDIDATE SET · ${r.candidate_ids.length} VEHICLES</div>
       <div class="candidate-chips">${chips}</div>
       <div class="candidate-note">${escapeHtml((note && note.text) ||
@@ -268,11 +307,7 @@ function reviewCardHtml(r) {
       <div class="rc-tag">NEEDS REVIEW</div>
       <div class="rc-score mono">${Math.round(r.score * 100)}%</div>
     </div>
-    <div class="rc-crops">
-      <figure>${sightingImg}</figure>
-      <span class="rc-vs">vs</span>
-      <figure>${refImg}</figure>
-    </div>
+    <div class="rc-clip">${sightingClipHtml(r)}</div>
     <div class="fact-list">${facts.map(factRowHtml).join("")}</div>
     ${confMeterHtml(r.score, r.score_breakdown)}
     ${(r.counterfactuals && r.counterfactuals.length) ? `
@@ -306,6 +341,7 @@ async function refreshReviews() {
     if (accept) accept.onclick = () => resolveReview(r.review_id, true);
     if (reject) reject.onclick = () => resolveReview(r.review_id, false);
   });
+  attachClipPlayers(el);
 }
 
 function expandAnomalyCard(card, r) {
@@ -317,6 +353,7 @@ function expandAnomalyCard(card, r) {
   card.innerHTML = `
     <div class="rc-head"><div class="rc-tag" style="color:var(--veto)">ANOMALY</div>
       <div class="rc-score mono">${Math.round(r.score * 100)}%</div></div>
+    <div class="rc-clip">${sightingClipHtml(r)}</div>
     <div class="fact-list">${facts.map(factRowHtml).join("")}</div>
     <div class="rc-actions">
       <button class="btn-accept">Accept</button>
@@ -324,6 +361,7 @@ function expandAnomalyCard(card, r) {
     </div>`;
   card.querySelector(".btn-accept").onclick = () => resolveReview(r.review_id, true);
   card.querySelector(".btn-reject").onclick = () => resolveReview(r.review_id, false);
+  attachClipPlayers(card);
 }
 
 async function resolveReview(reviewId, accept) {
@@ -412,6 +450,36 @@ async function openDossier(targetId) {
       <div class="ti-sub">${escapeHtml(c.verdict)} · belief ${c.belief_after.toFixed(2)}</div>
     </div>`).join("");
 
+  // Top of the dossier: a toggle between the 3D reconstruction and the clip
+  // of the sighting where the system first locked onto this target. Defaults
+  // to the clip so it's useful even with 3D off (the plain synthetic demo).
+  const clipPane = clipPlayerHtml(d.reference_clip, {
+    still: d.reference_crop ? `/api/crops/${d.reference_crop}` : "",
+    empty: "no sighting yet" });
+  const model3dPane = model3d.exists ? `
+      <div class="dossier-section-label">Reconstruction (fused from confirmed sightings only)</div>
+      <div class="dossier-recon"><img src="${model3d.turntable}" alt="turntable with provenance overlay"></div>
+      <div class="dossier-legend">
+        <span><span class="sw sw-good"></span>confirmed (${Math.round(model3d.observed_fraction * 100)}% of structure)</span>
+        <span><span class="sw sw-guess"></span>generative-prior guess</span>
+      </div>
+      <div class="d-sub" style="margin-top:4px">${model3d.observations} fused observation(s) · ${model3d.n_splats} splats
+        ${model3d.geometry && model3d.geometry.trustworthy
+          ? ` · ${escapeHtml(model3d.geometry.body_profile)}, ${escapeHtml(model3d.geometry.length_class)} (L/W ${model3d.geometry.lw_ratio})`
+          : " · geometry withheld: too little confirmed structure"}`
+    : `<div class="dossier-recon-empty">3D model not reconstructed yet.
+        <span style="color:var(--dim)">Enable <code>EYES_ENABLE_3D</code> and confirm sightings to
+        build one from fused observations.</span></div>`;
+  const dossierTop = `
+    <div class="dossier-top">
+      <div class="dossier-toggle">
+        <button class="dossier-tab active" data-pane="clip">Targeting clip</button>
+        <button class="dossier-tab" data-pane="model3d">3D model</button>
+      </div>
+      <div class="dossier-pane" data-pane="clip">${clipPane}</div>
+      <div class="dossier-pane hidden" data-pane="model3d">${model3dPane}</div>
+    </div>`;
+
   document.getElementById("side-dossier").innerHTML = `
     <div class="dossier-header">
       <div style="display:flex;justify-content:space-between;align-items:center">
@@ -422,20 +490,7 @@ async function openDossier(targetId) {
         profile v${live.profile_version ?? 0} · gallery ${d.gallery_size} crops
         ${d.plate ? " · plate " + escapeHtml(d.plate) : ""}</div>
     </div>
-    ${model3d.exists ? `
-    <div>
-      <div class="dossier-section-label">Reconstruction (fused from confirmed sightings only)</div>
-      <div class="dossier-recon"><img src="${model3d.turntable}" alt="turntable with provenance overlay"></div>
-      <div class="dossier-legend">
-        <span><span class="sw sw-good"></span>confirmed (${Math.round(model3d.observed_fraction * 100)}% of structure)</span>
-        <span><span class="sw sw-guess"></span>generative-prior guess</span>
-      </div>
-      <div class="d-sub" style="margin-top:4px">${model3d.observations} fused observation(s) · ${model3d.n_splats} splats
-        ${model3d.geometry && model3d.geometry.trustworthy
-          ? ` · ${escapeHtml(model3d.geometry.body_profile)}, ${escapeHtml(model3d.geometry.length_class)} (L/W ${model3d.geometry.lw_ratio})`
-          : " · geometry withheld: too little confirmed structure"}</div>
-    </div>` : (d.reference_crop ? `
-    <div class="dossier-recon"><img src="/api/crops/${d.reference_crop}" style="width:160px"></div>` : "")}
+    ${dossierTop}
     <div>
       <div class="dossier-section-label">Sighting history</div>
       <div class="timeline">${chain || '<div class="ti-sub">no associations yet</div>'}</div>
@@ -457,6 +512,16 @@ async function openDossier(targetId) {
         <button class="link-btn" onclick="document.getElementById('audit-drawer').classList.remove('hidden')">view full chain ▸</button></div>
       ${model3d.exists ? `<div class="dossier-audit-entry"><a href="${model3d.exports.splat}" style="color:var(--accent)">model.splat</a> · <a href="${model3d.exports.provenance_ply}" style="color:var(--accent)">provenance .ply</a></div>` : ""}
     </div>`;
+  const dossierEl = document.getElementById("side-dossier");
+  dossierEl.querySelectorAll(".dossier-tab").forEach((tab) => {
+    tab.onclick = () => {
+      dossierEl.querySelectorAll(".dossier-tab").forEach(
+        (t) => t.classList.toggle("active", t === tab));
+      dossierEl.querySelectorAll(".dossier-pane").forEach(
+        (p) => p.classList.toggle("hidden", p.dataset.pane !== tab.dataset.pane));
+    };
+  });
+  attachClipPlayers(dossierEl);
   showDossierView();
 }
 

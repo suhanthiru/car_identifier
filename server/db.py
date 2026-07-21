@@ -67,6 +67,10 @@ class SightingRow(SQLModel, table=True):
     instance_attrs: str = "{}"
     detection_source: str = ""
     crop_path: str = ""
+    # Number of short-clip frames saved for this sighting as
+    # "{event_id}.f{i}.png" in the crops dir (0 = still only). The console
+    # derives their /api/crops URLs from event_id + this count.
+    clip_frame_count: int = 0
     # Simulator ground truth — evaluation only, never read on the serving path.
     truth_id: str = ""
 
