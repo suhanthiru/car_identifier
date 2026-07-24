@@ -61,10 +61,13 @@ def test_vehicles_returns_real_shape_with_thumbnail(cityflow_client):
     vehicles = resp.json()
     assert len(vehicles) == 1
     v = vehicles[0]
-    assert set(v.keys()) == {"vehicle_id", "first_camera", "first_time_s", "thumbnail_b64"}
+    assert set(v.keys()) == {"vehicle_id", "first_camera", "first_time_s",
+                             "thumbnail_b64", "gallery_b64"}
     assert v["vehicle_id"] == 7
     assert v["first_camera"] == "c001"
     assert v["thumbnail_b64"]
+    # Reference-gallery seeds: >=1 real passage crop, thumbnail among them.
+    assert v["gallery_b64"] and v["thumbnail_b64"] in v["gallery_b64"]
 
 
 def test_vehicles_404_for_a_different_scenario_name(cityflow_client):

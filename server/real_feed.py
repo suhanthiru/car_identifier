@@ -82,23 +82,38 @@ def build_vehicle_index(
     out: list[dict] = []
     for vid, span in sorted(earliest.items()):
         thumb_b64 = ""
+        gallery_b64: list[str] = []
         cam_dir = camera_dirs.get(span.camera_id)
         if cam_dir is not None:
-            frames = vehicle_frame_spans(cam_dir / "gt" / "gt.txt")
-            fr = frames.get(vid)
+            gt = cam_dir / "gt" / "gt.txt"
+            fr = vehicle_frame_spans(gt).get(vid)
             if fr is not None:
-                bbox = bbox_for(cam_dir / "gt" / "gt.txt", fr[0], vid)
-                if bbox is not None:
-                    src = sources.setdefault(
-                        span.camera_id, VideoFrameSource(cam_dir / "vdo.avi"))
-                    crop = src.crop(fr[0], bbox)
-                    if crop is not None:
-                        ok, png = cv2.imencode(".png", crop)
-                        if ok:
-                            thumb_b64 = base64.b64encode(png.tobytes()).decode("ascii")
+                src = sources.setdefault(
+                    span.camera_id, VideoFrameSource(cam_dir / "vdo.avi"))
+                # First frame is the display thumbnail; first/mid/last
+                # together are the flag's reference-gallery seeds. The
+                # passage midpoint matters: it is the exact crop the feed
+                # later reports as this camera's sighting, so a flagged
+                # car's own passage can actually match itself instead of
+                # depending on how far the car moved since frame one.
+                for frame in {fr[0], (fr[0] + fr[1]) // 2, fr[1]}:
+                    bbox = bbox_for(gt, frame, vid)
+                    if bbox is None:
+                        continue
+                    crop = src.crop(frame, bbox)
+                    if crop is None or not crop.size:
+                        continue
+                    ok, png = cv2.imencode(".png", crop)
+                    if not ok:
+                        continue
+                    b64 = base64.b64encode(png.tobytes()).decode("ascii")
+                    gallery_b64.append(b64)
+                    if frame == fr[0]:
+                        thumb_b64 = b64
         out.append({
             "vehicle_id": vid, "first_camera": span.camera_id,
             "first_time_s": span.enter_s, "thumbnail_b64": thumb_b64,
+            "gallery_b64": gallery_b64,
         })
     for src in sources.values():
         src.close()

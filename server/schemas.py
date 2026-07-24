@@ -15,6 +15,16 @@ class FlagTargetRequest(BaseModel):
     plate: str = ""
     class_attrs: dict[str, str] = {}
     instance_attrs: dict[str, str] = {}
+    # Optional reference photo of the vehicle being flagged (base64 PNG) —
+    # e.g. the CityFlow browse thumbnail the operator clicked. The server
+    # seeds honestly-derived evidence from it: the pixel-color heuristic and
+    # one appearance-gallery embedding. Without it a label-only flag has no
+    # evidence for the cascade to ever match against.
+    reference_crop_b64: str = ""
+    # Further crops of the same reference passage (base64 PNGs) — the pose
+    # changes across a passage, so seeding first/mid/last frames lets the
+    # capped ReID tiebreaker actually recognize the flagged car later.
+    reference_gallery_b64: list[str] = []
 
 
 class PlateReadIn(BaseModel):
