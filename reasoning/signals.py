@@ -18,6 +18,7 @@ from perception.plates import CONFUSIONS
 from perception.types import Observation
 from reasoning.plausibility import (
     GEOM_PREFIX, PLATE_VETO_CONF, STALE_TRACK_S, _char_diffs, _partial_match,
+    colors_confusable,
 )
 from reasoning.profile import TargetProfile
 from sim.road_graph import RoadGraph
@@ -125,8 +126,15 @@ def _attribute_signals(obs: Observation, profile: TargetProfile) -> dict:
         out["body_veto"] = True
     matches = [k for k in ("make", "model", "color")
                if want.get(k) and got.get(k) and want[k] == got[k]]
-    mismatches = tuple(k for k in ("make", "model", "color")
-                       if want.get(k) and got.get(k) and want[k] != got[k])
+    raw_mismatches = [k for k in ("make", "model", "color")
+                      if want.get(k) and got.get(k) and want[k] != got[k]]
+    # Confusable-color rule, mirroring check_attributes: adjacent bins of
+    # the pixel heuristic count as consistent, not as a mismatch.
+    if ("color" in raw_mismatches
+            and colors_confusable(want["color"], got["color"])):
+        raw_mismatches.remove("color")
+        matches.append("color")
+    mismatches = tuple(raw_mismatches)
     if want.get("body_type") and got.get("body_type") == want.get("body_type"):
         matches.append("body_type")
     if matches:
