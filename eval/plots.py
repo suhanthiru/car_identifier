@@ -78,6 +78,31 @@ def plot_pair_gallery(pair_images: list[tuple[np.ndarray, np.ndarray, str]],
     return _save(fig, name)
 
 
+def plot_similarity_distributions(
+    positive_sims: list[float], hard_negative_sims: list[float],
+    random_negative_sims: list[float], name: str, title: str,
+) -> Path:
+    """Raw feature separability, upstream of any calibration fit: do
+    same-vehicle and different-vehicle (same color/body bucket) similarities
+    actually separate, or genuinely overlap on this data?"""
+    fig, ax = plt.subplots(figsize=(5.8, 3.8))
+    bins = np.linspace(0.0, 1.0, 41)
+    ax.hist(random_negative_sims, bins=bins, alpha=0.35, density=True,
+            label=f"random negatives (n={len(random_negative_sims)})", color="gray")
+    ax.hist(hard_negative_sims, bins=bins, alpha=0.55, density=True,
+            label=f"hard negatives, same bucket (n={len(hard_negative_sims)})",
+            color="firebrick")
+    ax.hist(positive_sims, bins=bins, alpha=0.55, density=True,
+            label=f"positives, same vehicle (n={len(positive_sims)})",
+            color="seagreen")
+    ax.set_xlabel("cosine similarity")
+    ax.set_ylabel("density")
+    ax.set_title(title)
+    ax.legend(fontsize=8)
+    ax.grid(alpha=0.3)
+    return _save(fig, name)
+
+
 def plot_transit_hist(elapsed: list[float], vetoed_below: float, name: str) -> Path:
     fig, ax = plt.subplots(figsize=(5.5, 3.4))
     ax.hist(elapsed, bins=40, alpha=0.85)
