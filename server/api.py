@@ -124,6 +124,9 @@ def create_app(
     # POST /api/pipeline_config so a single demo session can show both
     # states, not just a startup flag.
     state.enable_plate_ocr = enable_plate_ocr
+    # Shared lazy embedder for photo-seeded flags (see _flag_embedder below);
+    # tests may inject a stub here to avoid the model load.
+    state.flag_embedder = None
 
     # Real-clip mode only: the CityFlow scenario this server instance is
     # actively replaying (server/real_feed.py), if any. Set once at
@@ -256,7 +259,11 @@ def create_app(
                     timestamp_s=ev.timestamp_s))
                 if obs is not None:
                     row = session.get(dbm.TargetRow, ev.target_id)
-                    if row and not row.reference_crop:
+                    # First associated sighting becomes the reference; a
+                    # flag-photo placeholder ("{target_id}-ref.png") gives
+                    # way to it so the dossier's targeting clip resolves.
+                    if row and (not row.reference_crop
+                                or row.reference_crop.endswith("-ref.png")):
                         row.reference_crop = f"{obs.event_id}.png"
                         session.add(row)
 
@@ -300,21 +307,74 @@ def create_app(
 
     # ------------------------------------------------------------ targets
 
+    def _flag_embedder():
+        # Lazy: only flags that carry a reference photo pay the model load,
+        # and one shared instance serves them all (ReidEmbedder locks its
+        # own lazy load, same as the edge tier's shared embedder).
+        if state.flag_embedder is None:
+            from perception.embedder import ReidEmbedder
+
+            state.flag_embedder = ReidEmbedder()
+        return state.flag_embedder
+
+    def _seed_profile_from_photo(profile, png_bytes: bytes,
+                                 extra_pngs: list[bytes] = ()):
+        """Honest evidence from the operator's own reference photos: the
+        pixel-color heuristic (the same one sightings use) plus one
+        appearance-gallery embedding per reference crop. ReID stays a
+        capped tiebreaker — the photos let the cascade *consider* this
+        target, they cannot confirm anything by themselves, and the
+        distinctiveness floor still routes color+appearance matches to
+        review as a candidate set."""
+        import cv2
+
+        from perception.attributes import estimate_color
+
+        crop = cv2.imdecode(np.frombuffer(png_bytes, np.uint8), cv2.IMREAD_COLOR)
+        if crop is None or crop.size == 0:
+            raise HTTPException(422, "reference_crop_b64 is not a decodable image")
+        crops = [crop]
+        for extra in extra_pngs:
+            more = cv2.imdecode(np.frombuffer(extra, np.uint8), cv2.IMREAD_COLOR)
+            if more is not None and more.size:   # extras are best-effort
+                crops.append(more)
+        class_attrs = dict(profile.class_attrs)
+        class_attrs.setdefault("color", estimate_color(crop))
+        embedder = _flag_embedder()
+        return dataclasses.replace(
+            profile, class_attrs=class_attrs,
+            gallery=tuple(embedder.embed(c) for c in crops))
+
     @app.post("/api/targets", status_code=201)
     def flag_target(req: FlagTargetRequest):
         target_id = f"tgt-{next(state.target_seq):03d}"
         profile = profile_from_flag(
             target_id, req.label, req.plate, req.class_attrs, req.instance_attrs)
+        reference_crop = ""
+        if req.reference_crop_b64:
+            try:
+                png = base64.b64decode(req.reference_crop_b64, validate=True)
+                extras = [base64.b64decode(g, validate=True)
+                          for g in req.reference_gallery_b64]
+            except binascii.Error as exc:
+                raise HTTPException(
+                    422, "reference crop is not valid base64") from exc
+            profile = _seed_profile_from_photo(profile, png, extras)
+            reference_crop = f"{target_id}-ref.png"
+            (state.crops_dir / reference_crop).write_bytes(png)
         state.tracker.flag_target(profile)
         with Session(engine) as session:
             session.add(dbm.TargetRow(
                 target_id=target_id, label=req.label, plate=profile.plate,
                 class_attrs=dbm.dumps(dict(profile.class_attrs)),
                 instance_attrs=dbm.dumps(dict(profile.instance_attrs)),
+                reference_crop=reference_crop,
                 created_s=state.sim_now))
             audit_record(session, "operator", "flag_target",
                          {"target_id": target_id, "label": req.label,
-                          "plate": profile.plate}, state.sim_now)
+                          "plate": profile.plate,
+                          "photo_seeded": bool(req.reference_crop_b64)},
+                         state.sim_now)
             session.commit()
         return {"target_id": target_id}
 
@@ -518,6 +578,12 @@ def create_app(
 
     @app.post("/api/reviews/{review_id}/resolve")
     async def operator_confirm_match(review_id: str, res: ReviewResolution):
+        # Grab the sighting behind the review before resolution pops it, so
+        # an accepted first match can set the target's reference crop/clip
+        # (review-accepted targets otherwise never get a targeting clip).
+        pending = next((r for r in state.tracker.pending_reviews()
+                        if r.review_id == review_id), None)
+        obs = pending.observation if pending else None
         try:
             events = state.tracker.resolve_review(review_id, res.accept, state.sim_now)
         except KeyError:
@@ -528,7 +594,7 @@ def create_app(
                 row.status = "accepted" if res.accept else "rejected"
                 row.resolved_s = state.sim_now
                 session.add(row)
-            _persist_events(session, events, None)
+            _persist_events(session, events, obs)
             _fuse_3d_for_events(events, session)
             _sync_target_rows(session)
             audit_record(session, "operator", "resolve_review",
@@ -840,5 +906,15 @@ def create_app(
 
     if WEB_DIR.is_dir():
         app.mount("/", StaticFiles(directory=WEB_DIR, html=True), name="console")
+
+        @app.middleware("http")
+        async def _no_stale_console(request, call_next):
+            # The console JS/CSS changes often between demo runs and browsers
+            # otherwise serve day-old copies from disk cache; no-cache makes
+            # them revalidate (304 when unchanged) instead of going stale.
+            response = await call_next(request)
+            if not request.url.path.startswith("/api"):
+                response.headers.setdefault("Cache-Control", "no-cache")
+            return response
 
     return app

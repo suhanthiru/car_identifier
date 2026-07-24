@@ -124,6 +124,120 @@ def test_audit_verify_detects_db_tamper(tmp_path):
         assert audit["break_index"] == 0
 
 
+def white_png() -> bytes:
+    """A real cv2-decodable white crop (TINY_PNG's IDAT crc is broken —
+    browsers tolerate it, cv2.imdecode does not)."""
+    import cv2
+    import numpy as np
+
+    ok, png = cv2.imencode(".png", np.full((8, 8, 3), 255, dtype=np.uint8))
+    assert ok
+    return png.tobytes()
+
+
+class _StubEmbedder:
+    """Deterministic stand-in for ReidEmbedder in photo-seeded flag tests."""
+
+    def embed(self, crop_bgr):
+        return unit_vec(7, 16)
+
+
+def photo_app(tmp_path):
+    # calibration_path="" -> the deterministic uncalibrated-linear reid
+    # curve, so the score arithmetic below never depends on a fitted model.
+    app = create_app(db_url=f"sqlite:///{tmp_path}/photo.sqlite",
+                     crops_dir=str(tmp_path / "crops"), calibration_path="")
+    app.state.flag_embedder = _StubEmbedder()
+    return app
+
+
+def test_flag_with_reference_photo_seeds_profile(tmp_path):
+    app = photo_app(tmp_path)
+    with TestClient(app) as c:
+        resp = c.post("/api/targets", json={
+            "label": "clicked car",
+            "reference_crop_b64": base64.b64encode(white_png()).decode()})
+        assert resp.status_code == 201
+        tid = resp.json()["target_id"]
+        dossier = c.get(f"/api/targets/{tid}").json()
+        # Real derived evidence, not wildcards: pixel color + one gallery vec.
+        assert dossier["class_attrs"] == {"color": "white"}
+        assert dossier["gallery_size"] == 1
+        assert dossier["reference_crop"] == f"{tid}-ref.png"
+        # Extra passage crops each seed one more gallery embedding.
+        resp2 = c.post("/api/targets", json={
+            "label": "clicked car 2",
+            "reference_crop_b64": base64.b64encode(white_png()).decode(),
+            "reference_gallery_b64": [
+                base64.b64encode(white_png()).decode() for _ in range(2)]})
+        d2 = c.get(f"/api/targets/{resp2.json()['target_id']}").json()
+        assert d2["gallery_size"] == 3
+        got = c.get(f"/api/crops/{tid}-ref.png")
+        assert got.status_code == 200 and got.content == white_png()
+
+
+def test_photo_seeded_flag_routes_matching_sighting_to_review(tmp_path):
+    app = photo_app(tmp_path)
+    with TestClient(app) as c:
+        c.post("/api/targets", json={
+            "label": "clicked car",
+            "reference_crop_b64": base64.b64encode(white_png()).decode()})
+        # Same appearance (stub sim=1.0) + matching color, no plate: color
+        # support (0.20) + capped ReID (0.30) clears LIKELY but sits below
+        # the distinctiveness floor -> candidate-set review, never an
+        # automatic association.
+        resp = c.post("/api/sightings", json=sighting(
+            plate=None, class_attrs={"color": "white"}, seed=7))
+        events = resp.json()["events"]
+        assert "review" in events
+        assert "association" not in events
+
+
+def test_photo_seeded_flag_ignores_non_matching_sighting(tmp_path):
+    app = photo_app(tmp_path)
+    with TestClient(app) as c:
+        c.post("/api/targets", json={
+            "label": "clicked car",
+            "reference_crop_b64": base64.b64encode(white_png()).decode()})
+        # Different color and unrelated appearance: no symbolic support, so
+        # ReID alone must not surface anything (lifecycle state_changes are
+        # fine; a review or association is not).
+        resp = c.post("/api/sightings", json=sighting(
+            plate=None, class_attrs={"color": "red"}, seed=9))
+        assert not {"review", "association"} & set(resp.json()["events"])
+
+
+def test_flag_rejects_bad_reference_photo(client):
+    bad_b64 = client.post("/api/targets", json={
+        "label": "x", "reference_crop_b64": "not-base64!!"})
+    assert bad_b64.status_code == 422
+    not_an_image = client.post("/api/targets", json={
+        "label": "x",
+        "reference_crop_b64": base64.b64encode(b"plain bytes").decode()})
+    assert not_an_image.status_code == 422
+
+
+def test_first_association_replaces_flag_photo_reference(tmp_path):
+    app = photo_app(tmp_path)
+    with TestClient(app) as c:
+        tid = c.post("/api/targets", json={
+            "label": "clicked car",
+            "reference_crop_b64": base64.b64encode(white_png()).decode()}
+        ).json()["target_id"]
+        c.post("/api/sightings", json=sighting(
+            plate=None, class_attrs={"color": "white"}, seed=7, crop=True,
+            clip=2))
+        review = c.get("/api/reviews").json()[0]
+        c.post(f"/api/reviews/{review['review_id']}/resolve",
+               json={"accept": True})
+        dossier = c.get(f"/api/targets/{tid}").json()
+        # The accepted first sighting takes over from the flag-photo
+        # placeholder, so the targeting clip resolves to real frames.
+        assert dossier["reference_crop"] == "evt-1.png"
+        assert dossier["reference_clip"] == [
+            "/api/crops/evt-1.f0.png", "/api/crops/evt-1.f1.png"]
+
+
 def test_flag_and_confirm_flow(client):
     target_id = flag(client)
     resp = client.post("/api/sightings", json=sighting(crop=True))

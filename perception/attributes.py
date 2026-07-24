@@ -33,6 +33,8 @@ def estimate_color(crop_bgr: np.ndarray) -> str:
     """Nearest named color of the central body region. Real heuristic."""
     h, w = crop_bgr.shape[:2]
     region = crop_bgr[int(h * 0.35): int(h * 0.60), int(w * 0.25): int(w * 0.75)]
+    if region.size == 0:  # degenerate crop (a few pixels): use all of it
+        region = crop_bgr
     mean = region.reshape(-1, 3).mean(axis=0)
     names = list(COLOR_BGR)
     dists = [float(np.linalg.norm(mean - np.array(COLOR_BGR[n]))) for n in names]
