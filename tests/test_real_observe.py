@@ -85,6 +85,30 @@ def test_missing_camera_or_frame_returns_none(tmp_path, embedder):
     assert perceptor.process("c999", vehicle_id=7, frame=0, timestamp_s=1.0) is None
 
 
+def test_midpoint_annotation_hole_uses_nearest_boxed_frame(tmp_path, embedder):
+    # GT tracks can be un-annotated exactly at a passage's midpoint frame
+    # (occlusion). The perceptor must fall back to the nearest annotated
+    # frame instead of silently dropping the whole passage.
+    cam_dir = tmp_path / "c001"
+    (cam_dir / "gt").mkdir(parents=True)
+    (cam_dir / "gt" / "gt.txt").write_text(
+        "\n".join(f"{f},7,5,5,20,15,1,-1,-1,-1" for f in (0, 1, 2, 8, 9)))
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    writer = cv2.VideoWriter(str(cam_dir / "vdo.avi"), fourcc, 10.0, (FRAME_W, FRAME_H))
+    for i in range(10):
+        writer.write(np.full((FRAME_H, FRAME_W, 3), 60 + i * 15, dtype=np.uint8))
+    writer.release()
+    perceptor = RealPerceptor({"c001": cam_dir}, embedder=embedder,
+                              plate_reader=_StubPlateReader(None))
+    # Frame 5 has no box; frames 2 and 8 are equidistant-ish (2 is 3 away,
+    # 8 is 3 away -- the search finds 2 first, scanning -off before +off).
+    obs = perceptor.process("c001", vehicle_id=7, frame=5, timestamp_s=1.0)
+    assert obs is not None
+    assert obs.event_id == "cf-c001-2-7"    # nearest annotated frame, not 5
+    # A vehicle with no boxes anywhere nearby still returns None.
+    assert perceptor.process("c001", vehicle_id=42, frame=5, timestamp_s=1.0) is None
+
+
 def test_clip_collapses_to_the_only_boxed_frame(tmp_path, embedder):
     # Multi-frame video but a box at frame 0 only: the clip window skips the
     # boxless frames and collapses to that one real crop -- honestly shorter,
