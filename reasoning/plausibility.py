@@ -22,6 +22,21 @@ from sim.road_graph import RoadGraph
 # A clean plate read at or above this confidence that flatly mismatches the
 # target's known plate is a hard veto.
 PLATE_VETO_CONF = 0.75
+# Pixel-color bins the color heuristic flips between under lighting/camera
+# casts (adjacent bins of one measurement) — the color analog of the OCR
+# CONFUSIONS table. A "mismatch" across one of these pairs is heuristic
+# noise, not evidence of a different vehicle; verified on real CityFlow
+# footage, where the same car reads silver at one camera and gray at the
+# next. Chroma flips (blue vs red, etc.) stay real mismatches.
+CONFUSABLE_COLORS = (
+    frozenset({"silver", "gray"}),
+    frozenset({"silver", "white"}),
+    frozenset({"gray", "black"}),
+)
+
+
+def colors_confusable(a: str, b: str) -> bool:
+    return frozenset({a, b}) in CONFUSABLE_COLORS
 # Sightings this long after the last one (seconds) carry no corroboration
 # weight — the target could have gone anywhere in the meantime.
 STALE_TRACK_S = 900.0
@@ -129,6 +144,13 @@ def check_attributes(obs: Observation, profile: TargetProfile) -> list[Fact]:
                if want.get(k) and got.get(k) and want[k] == got[k]]
     mismatches = [k for k in ("make", "model", "color")
                   if want.get(k) and got.get(k) and want[k] != got[k]]
+    if "color" in mismatches and colors_confusable(want["color"], got["color"]):
+        mismatches.remove("color")
+        matches.append("color")
+        facts.append(support(
+            f"Color read {got['color']} vs target {want['color']}: adjacent "
+            f"bins of the pixel color heuristic (lighting flips these); "
+            f"treated as consistent, not a mismatch.", "attributes"))
     if want.get("body_type") and got.get("body_type") == want.get("body_type"):
         matches.append("body_type")
     if matches:

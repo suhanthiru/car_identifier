@@ -132,6 +132,16 @@ def test_color_mismatch_only_cautions():
     assert KIND_CAUTION in kinds and KIND_VETO not in kinds
 
 
+def test_confusable_color_pair_treated_as_consistent():
+    # silver vs gray: adjacent bins of the pixel heuristic (real CityFlow
+    # footage reads the same car silver at one camera, gray at the next) —
+    # support, not a caution.
+    obs = make_obs(class_attrs={**CAMRY, "color": "gray"})
+    facts = check_attributes(obs, make_profile())
+    assert any(f.kind == KIND_SUPPORT and "adjacent bins" in f.text for f in facts)
+    assert KIND_CAUTION not in {f.kind for f in facts}
+
+
 def test_matching_mark_supports_and_conflicting_mark_vetoes():
     profile = make_profile(instance_attrs={"accessory": "roof rack"})
     match = check_attributes(make_obs(instance_attrs={"accessory": "roof rack"}), profile)
