@@ -72,7 +72,7 @@ def _version_of(pairs: list[SimilarityPair]) -> str:
     return h.hexdigest()[:10]
 
 
-def fit(pairs: list[SimilarityPair]) -> CalibrationModel:
+def fit(pairs: list[SimilarityPair], note: str = HONESTY_NOTE) -> CalibrationModel:
     if len(pairs) < 10:
         raise ValueError("not enough pairs to calibrate")
     from sklearn.isotonic import IsotonicRegression
@@ -89,6 +89,7 @@ def fit(pairs: list[SimilarityPair]) -> CalibrationModel:
         y=tuple(float(v) for v in iso.predict(grid)),
         n_pairs=len(pairs),
         n_hard_negatives=sum(p.hard_negative for p in pairs),
+        note=note,
     )
 
 
@@ -125,9 +126,9 @@ def choose_threshold(sweep: tuple[SweepPoint, ...], target_precision: float = 0.
     return max(sweep, key=lambda p: p.f1).threshold
 
 
-def build_report(pairs: list[SimilarityPair], target_precision: float = 0.95
-                 ) -> CalibrationReport:
-    model = fit(pairs)
+def build_report(pairs: list[SimilarityPair], target_precision: float = 0.95,
+                 note: str = HONESTY_NOTE) -> CalibrationReport:
+    model = fit(pairs, note=note)
     sweep = pr_sweep(pairs)
     threshold = choose_threshold(sweep, target_precision)
     hard = [p for p in pairs if p.hard_negative]

@@ -55,9 +55,23 @@ def start_server(
 ) -> tuple[uvicorn.Server, object]:
     from server.api import create_app
 
+    # Calibration is per-deployment: the default artifact was fitted on
+    # SYNTHETIC sprite pairs and maps real same-car similarities (~0.8) to
+    # p~0, and the VeRi curve answers a different dataset's question. Use
+    # this scenario's own fitted curve when it exists (see
+    # scripts/calibrate_cityflow.py); otherwise the honest fallback -- every
+    # fact then cites "uncalibrated-linear" instead of silently transferring
+    # a foreign curve.
+    calibration = Path(f"calibration/artifacts/cityflow_{scenario_name.lower()}.json")
+    calibration_path = str(calibration) if calibration.is_file() else ""
+    fallback_note = ("uncalibrated-linear fallback "
+                     "(run scripts/calibrate_cityflow.py to fit this scenario)")
+    print(f"reid calibration: {calibration_path or fallback_note}")
+
     app = create_app(
         graph=graph, db_url=f"sqlite:///{db_path.as_posix()}",
         crops_dir=str(CROPS_DIR), world_source="real",
+        calibration_path=calibration_path,
         enable_plate_ocr=enable_plate_ocr,
         cityflow_root=str(root), cityflow_scenario_name=scenario_name)
     config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")

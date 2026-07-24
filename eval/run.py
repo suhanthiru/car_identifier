@@ -66,7 +66,10 @@ def veri_section(quick: bool) -> str:
     plot_cmc(res.cmc, f"VeRi-776 CMC ({EMBED_ARCH.split()[0]})", "veri_cmc.png")
 
     pairs = mine_pairs(gallery, g_emb)
-    report = build_report(pairs)
+    report = build_report(pairs, note=(
+        "Calibrated on VeRi-776 gallery pairs (real vehicle crops): measures "
+        "this embedder's confusability on that dataset — it does not "
+        "transfer to other deployments (see eval/generalization notes)."))
     save(report, "calibration/artifacts/veri776.json")
     rel = compute_reliability(pairs, report.model)
     plot_reliability(rel.bins, rel.ece, "veri_reliability.png")
