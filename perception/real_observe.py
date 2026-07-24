@@ -24,6 +24,10 @@ from perception.types import CLIP_FRAMES, SOURCE_HEURISTIC, Observation
 # Frames between the sampled clip frames. At CityFlow's ~10fps a step of 6
 # spans roughly +/-1.5s of real footage across CLIP_FRAMES samples.
 CLIP_FRAME_STEP = 6
+# Ground-truth tracks have holes (occlusion) that can land exactly on a
+# passage's midpoint frame; search this many frames either side for the
+# nearest annotated one before giving up on the sighting (~3s at 10fps).
+MID_FRAME_SEARCH = 30
 
 
 class RealPerceptor:
@@ -87,6 +91,26 @@ class RealPerceptor:
                 frames.append(crop)
         return tuple(frames)
 
+    @staticmethod
+    def _nearest_annotated_frame(
+        gt_path: Path, frame: int, vehicle_id: int,
+    ) -> tuple[int, tuple[int, int, int, int] | None]:
+        """The requested frame's box, or the nearest annotated frame within
+        MID_FRAME_SEARCH either side -- GT tracks can be un-annotated exactly
+        at a passage's midpoint (occlusion) and one hole must not silently
+        drop the whole passage."""
+        bbox = bbox_for(gt_path, frame, vehicle_id)
+        if bbox is not None:
+            return frame, bbox
+        for off in range(1, MID_FRAME_SEARCH + 1):
+            for f in (frame - off, frame + off):
+                if f < 0:
+                    continue
+                bbox = bbox_for(gt_path, f, vehicle_id)
+                if bbox is not None:
+                    return f, bbox
+        return frame, None
+
     def process(
         self, camera_id: str, vehicle_id: int, frame: int, timestamp_s: float,
     ) -> Observation | None:
@@ -94,7 +118,7 @@ class RealPerceptor:
         if cam_dir is None:
             return None
         gt_path = cam_dir / "gt" / "gt.txt"
-        bbox = bbox_for(gt_path, frame, vehicle_id)
+        frame, bbox = self._nearest_annotated_frame(gt_path, frame, vehicle_id)
         if bbox is None:
             return None
         crop = self._video_source(camera_id).crop(frame, bbox)
