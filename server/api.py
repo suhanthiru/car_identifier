@@ -19,6 +19,9 @@ import base64
 import binascii
 import dataclasses
 import itertools
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import numpy as np
@@ -97,7 +100,20 @@ def create_app(
         prob_fn, label = make_reid_prob_fn(load_model(calibration_path))
         cascade_config = CascadeConfig(reid_prob_fn=prob_fn,
                                        reid_calibration_label=label)
-    app = FastAPI(title="Eyes Everywhere (synthetic demo)")
+    # Reconstruction takes tens of seconds and must not run inside the
+    # sighting-ingest request. One worker, so fusions also serialize against
+    # each other for the GPU. Created before the app so its shutdown can be
+    # bound into the lifespan.
+    car3d_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="car3d")
+
+    @asynccontextmanager
+    async def _lifespan(_app: FastAPI):
+        yield
+        # Let queued reconstructions finish rather than abandoning them
+        # half-written; the asset on disk is the audit trail.
+        car3d_executor.shutdown(wait=True)
+
+    app = FastAPI(title="Eyes Everywhere (synthetic demo)", lifespan=_lifespan)
     Path(crops_dir).mkdir(parents=True, exist_ok=True)
     if db_url.startswith("sqlite:///"):
         db_path = db_url.removeprefix("sqlite:///")
@@ -111,6 +127,47 @@ def create_app(
     state = app.state
     state.graph = graph
     state.engine = engine
+
+    def _verify_against_model3d(target_id: str, obs: Observation):
+        """Render-and-compare P(same) for the cascade's look-alike tiebreak.
+
+        Analysis-by-synthesis: the target's own 3D model is rendered into the
+        query crop's viewpoint and compared like-for-like, which is what makes
+        this survive the cross-view case that 2D ReID is worst at.
+
+        Abstains (None) for anything it cannot answer honestly — no crop, an
+        immature model, or any failure at all. The cascade treats None as "no
+        opinion" and leaves its ordering untouched; 3D corroborates, it never
+        sinks a decision.
+
+        Deliberately builds a Target3DModel with NO pipeline: verification only
+        loads and renders an existing asset. Handing it the shared pipeline
+        would make the first look-alike tie block the request thread on a
+        multi-gigabyte model load it has no use for.
+        """
+        if obs.crop is None:
+            return None
+        try:
+            from car3d.match import verify_match
+            from car3d.profile_model import Target3DModel
+
+            return verify_match(
+                Target3DModel(target_id, state.targets3d_dir), obs.crop,
+                state.embed_bgr, calibrator=state.render_calibrator,
+                embed_batch_fn=state.embed_bgr_batch).score
+        except Exception as exc:  # noqa: BLE001 — never sink a decision
+            print(f"car3d: render verification unavailable for {target_id}: {exc}")
+            return None
+
+    if enable_3d:
+        # Feature D: the dependency-inverted hook reasoning/ declares but never
+        # imports. Without this the verifier is built, tested and unreachable.
+        from reasoning.cascade import CascadeConfig
+
+        cascade_config = dataclasses.replace(
+            cascade_config or CascadeConfig(),
+            shortlist_verifier=_verify_against_model3d)
+
     state.tracker = FleetTracker(graph, cascade_config)
     state.manager = ConnectionManager()
     state.crops_dir = Path(crops_dir)
@@ -157,7 +214,47 @@ def create_app(
             state.render_embedder = ReidEmbedder()
         return state.render_embedder.embed(bgr)
 
+    def _embed_bgr_batch(images):
+        if state.render_embedder is None:
+            from perception.embedder import ReidEmbedder
+            state.render_embedder = ReidEmbedder()
+        return state.render_embedder.embed_batch(images)
+
     state.embed_bgr = _embed_bgr
+    state.embed_bgr_batch = _embed_bgr_batch
+
+    # --- 3D reconstruction resources -------------------------------------
+    # The cargen Pipeline is built ONCE and shared. A real prior backend
+    # (SF3D) loads ~4 GB of weights and holds most of an 8 GB GPU; building
+    # one per fusion event — which is what constructing Target3DModel without
+    # an injected pipeline does — reloaded all of it every single time.
+    state.car3d_pipeline = None
+    state.car3d_pipeline_lock = threading.Lock()
+    state.car3d_executor = car3d_executor
+    state.car3d_jobs: dict[str, object] = {}   # target_id -> most recent Future
+    # Guards the worker's read-modify-write of a profile against the event
+    # loop's own tracker mutations. Held for a dict swap, never across work.
+    state.tracker_lock = threading.Lock()
+
+    def _car3d_pipeline():
+        if state.car3d_pipeline is None:
+            with state.car3d_pipeline_lock:
+                if state.car3d_pipeline is None:
+                    from car3d.profile_model import build_pipeline
+
+                    state.car3d_pipeline = build_pipeline()
+        return state.car3d_pipeline
+
+    state.car3d_pipeline_factory = _car3d_pipeline
+
+    def _model_for(target_id: str):
+        """A Target3DModel wired to the shared pipeline."""
+        from car3d.profile_model import Target3DModel
+
+        return Target3DModel(target_id, state.targets3d_dir,
+                             pipeline=_car3d_pipeline())
+
+    state.car3d_model_for = _model_for
 
     # Rehydrate flagged targets from a pre-existing DB so a server restart
     # neither collides on target ids nor forgets what was flagged. Live
@@ -181,52 +278,92 @@ def create_app(
 
     # ------------------------------------------------------------ 3d bridge
 
-    def _fuse_3d_for_events(events, session: Session) -> None:
-        """Fuse gated (confirmed) sightings into per-target cargen models.
+    def _run_fusion(target_id: str, event_id: str, reason: str,
+                    timestamp_s: float) -> None:
+        """Reconstruct one confirmed crop into a target's model. Worker thread.
 
-        Runs only on profile_update events — the exact moments the profile
-        gate opened — so cargen's pending-approval merge policy and this
-        project's update gate stay one mechanism. Failures degrade to a
-        console note; 3D is corroborative, never load-bearing.
+        Owns its own Session: the request's session belongs to the request's
+        thread and must not be handed across. Every failure degrades to a
+        console note — 3D is corroborative and must never sink ingest.
         """
-        if not state.enable_3d:
-            return
         import cv2
 
         from car3d.geometry import signature_to_attrs
-        from car3d.profile_model import Target3DModel
+        from cargen.prior_generation.interface import InsufficientDetail
 
+        crop_path = state.crops_dir / f"{event_id}.png"
+        crop = cv2.imread(str(crop_path)) if crop_path.exists() else None
+        if crop is None:
+            return
+        try:
+            # export=False: the .ply/.splat set is ~20 MB and the turntable is
+            # six CPU renders. Both are regenerated on demand by the dossier
+            # endpoints, which are opened far less often than sightings arrive.
+            outcome = state.car3d_model_for(target_id).fuse_confirmed_crop(
+                crop, event_id, reason=reason, timestamp=timestamp_s,
+                export=False)
+        except InsufficientDetail as exc:
+            # Not a failure: the frame simply cannot support a reconstruction.
+            print(f"car3d: skipped a crop for {target_id} — {exc}")
+            return
+        except Exception as exc:  # noqa: BLE001 — 3D must never sink ingest
+            print(f"car3d: fusion failed for {target_id}: {exc}")
+            return
+
+        geom_attrs = signature_to_attrs(outcome.geometry)
+        if not geom_attrs:
+            return
+        with state.tracker_lock:
+            tracked = state.tracker.targets().get(target_id)
+            if tracked is None:
+                return
+            profile = dataclasses.replace(
+                tracked.profile,
+                instance_attrs={**tracked.profile.instance_attrs, **geom_attrs},
+                version=tracked.profile.version + 1)
+            state.tracker.replace_profile(target_id, profile)
+        with Session(state.engine) as session:
+            session.add(dbm.ProfileUpdateRow(
+                target_id=target_id, event_id=event_id,
+                version=profile.version,
+                reason="3D geometry attributes refreshed from the "
+                       "fused model (gated fusion, reversible).",
+                timestamp_s=timestamp_s))
+            session.commit()
+
+    def _fuse_3d_for_events(events, session: Session) -> None:
+        """Queue gated (confirmed) sightings for fusion into per-target models.
+
+        Runs only on profile_update events — the exact moments the profile
+        gate opened — so cargen's pending-approval merge policy and this
+        project's update gate stay one mechanism.
+
+        Queued rather than executed: a real backend takes tens of seconds per
+        crop, and this is called from the sighting-ingest path. `session` is
+        accepted for signature compatibility with the other _persist helpers
+        and deliberately unused — the worker opens its own.
+        """
+        if not state.enable_3d:
+            return
         for ev in [e for e in events if e.kind == "profile_update" and e.event_id]:
-            crop_path = state.crops_dir / f"{ev.event_id}.png"
-            crop = cv2.imread(str(crop_path)) if crop_path.exists() else None
-            if crop is None:
-                continue
-            try:
-                model = Target3DModel(ev.target_id, state.targets3d_dir)
-                outcome = model.fuse_confirmed_crop(
-                    crop, ev.event_id,
-                    reason=str(ev.detail.get("reason", "gated update")),
-                    timestamp=ev.timestamp_s)
-                model.turntable_png(provenance_overlay=True)
-            except Exception as exc:  # noqa: BLE001 — 3D must never sink ingest
-                print(f"car3d: fusion failed for {ev.target_id}: {exc}")
-                continue
-            geom_attrs = signature_to_attrs(outcome.geometry)
-            if geom_attrs:
-                tracked = state.tracker.targets().get(ev.target_id)
-                if tracked is not None:
-                    profile = dataclasses.replace(
-                        tracked.profile,
-                        instance_attrs={**tracked.profile.instance_attrs,
-                                        **geom_attrs},
-                        version=tracked.profile.version + 1)
-                    state.tracker.replace_profile(ev.target_id, profile)
-                    session.add(dbm.ProfileUpdateRow(
-                        target_id=ev.target_id, event_id=ev.event_id,
-                        version=profile.version,
-                        reason="3D geometry attributes refreshed from the "
-                               "fused model (gated fusion, reversible).",
-                        timestamp_s=ev.timestamp_s))
+            state.car3d_jobs[ev.target_id] = state.car3d_executor.submit(
+                _run_fusion, ev.target_id, ev.event_id,
+                str(ev.detail.get("reason", "gated update")), ev.timestamp_s)
+
+    def _await_fusion(target_id: str, timeout: float = 300.0) -> None:
+        """Block until this target's queued fusion settles.
+
+        The dossier should show settled state rather than a half-built model,
+        and it is operator-paced, so paying the wait here is right. One worker
+        means FIFO: awaiting the newest job implies the earlier ones finished.
+        """
+        job = state.car3d_jobs.get(target_id)
+        if job is None:
+            return
+        try:
+            job.result(timeout=timeout)
+        except Exception:  # noqa: BLE001 — already reported by the worker
+            pass
 
     # ------------------------------------------------------------ helpers
 
@@ -498,8 +635,9 @@ def create_app(
             (state.crops_dir / f"{obs.event_id}.f{i}.png").write_bytes(frame_png)
             clip_count += 1
 
-        events = state.tracker.process_observation(obs)
-        events += state.tracker.tick(state.sim_now)
+        with state.tracker_lock:
+            events = state.tracker.process_observation(obs)
+            events += state.tracker.tick(state.sim_now)
         with Session(engine) as session:
             session.add(dbm.SightingRow(
                 event_id=obs.event_id, camera_id=obs.camera_id,
@@ -585,7 +723,9 @@ def create_app(
                         if r.review_id == review_id), None)
         obs = pending.observation if pending else None
         try:
-            events = state.tracker.resolve_review(review_id, res.accept, state.sim_now)
+            with state.tracker_lock:
+                events = state.tracker.resolve_review(
+                    review_id, res.accept, state.sim_now)
         except KeyError:
             raise HTTPException(404, "unknown or already-resolved review")
         with Session(engine) as session:
@@ -837,13 +977,19 @@ def create_app(
     def target_model3d(target_id: str):
         """3D-model status for the dossier. exists=false when 3D is disabled
         or nothing has been fused yet — the UI hides the section then."""
+        from car3d.geometry import signature_from_cloud
         from car3d.profile_model import Target3DModel
 
+        # Settle any queued fusion first, so the dossier never reports a
+        # target as having no model purely because the worker is mid-flight.
+        _await_fusion(target_id)
         model = Target3DModel(target_id, state.targets3d_dir)
         if not model.exists():
             return {"exists": False, "enabled": state.enable_3d}
         asset = model.load()
-        sig = model.geometry()
+        sig = signature_from_cloud(asset.cloud)
+        # Derived artefacts are produced here rather than per fusion.
+        model.ensure_turntable(provenance_overlay=True)
         return {
             "exists": True, "enabled": state.enable_3d,
             "observations": len(asset.observations),
@@ -864,9 +1010,21 @@ def create_app(
 
     @app.get("/api/targets/{target_id}/model3d/{name}")
     def target_model3d_file(target_id: str, name: str):
+        from car3d.profile_model import Target3DModel
+
         base = (state.targets3d_dir / target_id / "exports").resolve()
         path = (base / name).resolve()
-        if base not in path.parents or not path.is_file():
+        # Resolve traversal BEFORE generating anything, so a hostile `name`
+        # cannot make us do work outside the export directory.
+        if base not in path.parents:
+            raise HTTPException(404, "no such model file")
+        _await_fusion(target_id)
+        model = Target3DModel(target_id, state.targets3d_dir)
+        if name.endswith(".png"):
+            model.ensure_turntable(provenance_overlay="provenance" in name)
+        elif name.endswith((".splat", ".ply")):
+            model.ensure_exports()
+        if not path.is_file():
             raise HTTPException(404, "no such model file")
         # A model export (.splat/.ply) leaves the system — audit it. Turntable
         # PNGs are UI and not logged.

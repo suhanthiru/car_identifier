@@ -98,6 +98,64 @@ def test_pose_search_returns_candidate():
     assert est.method == "search" and est.pose is not None
 
 
+def _angular_gap(a: float, b: float) -> float:
+    d = abs((a - b) % (2 * np.pi))
+    return min(d, 2 * np.pi - d)
+
+
+def test_pose_search_subsample_is_deterministic_and_agrees_with_full():
+    """Search renders a strided subset (PointRenderer costs one Python-loop
+    disc per splat). It must be reproducible, and must not move the optimum."""
+    cloud = box_cloud(n=8000)
+    crop = crop_of(cloud, az=1.2)
+    lean = VerifyConfig(azimuths=8, search_max_splats=1200)
+    full = VerifyConfig(azimuths=8, search_max_splats=10**9)
+
+    a = pose_search(cloud, crop, fake_embed, lean)
+    b = pose_search(cloud, crop, fake_embed, lean)
+    assert (a.azimuth_rad, a.elevation_rad) == (b.azimuth_rad, b.elevation_rad)
+
+    ref = pose_search(cloud, crop, fake_embed, full)
+    coarse_step = 2 * np.pi / max(4, lean.azimuths // 2)
+    assert _angular_gap(a.azimuth_rad, ref.azimuth_rad) <= coarse_step + 1e-9
+
+
+def test_batched_embedding_gives_the_same_pose():
+    """Batching is a throughput change, not a scoring change."""
+    cloud = box_cloud(n=3000)
+    crop = crop_of(cloud, az=0.9)
+    cfg = VerifyConfig(azimuths=8)
+
+    def batch(images):
+        return np.stack([fake_embed(im) for im in images])
+
+    one_by_one = pose_search(cloud, crop, fake_embed, cfg)
+    batched = pose_search(cloud, crop, fake_embed, cfg, embed_batch_fn=batch)
+    assert (one_by_one.azimuth_rad, one_by_one.elevation_rad) == \
+           (batched.azimuth_rad, batched.elevation_rad)
+
+
+def test_pose_search_renders_far_fewer_than_the_full_grid(monkeypatch):
+    """Coarse-to-fine: the exhaustive azimuth x elevation grid spent most of
+    its renders on orientations the coarse pass already ruled out."""
+    import car3d.match as m
+
+    calls = []
+    real_render = m._render
+
+    def counting(cloud, pose, size):
+        calls.append(1)
+        return real_render(cloud, pose, size)
+
+    monkeypatch.setattr(m, "_render", counting)
+    cfg = VerifyConfig(azimuths=12)
+    cloud = box_cloud(n=2000)
+    m.pose_search(cloud, crop_of(cloud, az=1.2), fake_embed, cfg)
+
+    exhaustive = cfg.azimuths * len(cfg.elevations)      # the old cost: 36
+    assert sum(calls) < exhaustive / 2, f"{sum(calls)} renders vs {exhaustive}"
+
+
 # ------------------------------------------------------------ verify + gates
 
 def test_maturity_gate_abstains():
