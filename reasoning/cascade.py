@@ -36,6 +36,7 @@ from reasoning.signals import MatchSignals, compute_signals
 from reasoning.weights import (
     CONFIRM_THRESHOLD, DISTINCTIVENESS_FLOOR, LIKELY_THRESHOLD, W_CLASS_ATTRS,
     W_GEOMETRY, W_INSTANCE_ATTR, W_PLATE_EXACT, W_PLATE_NEAR, W_REID_MAX,
+    W_TRANSIT_CONSISTENT,
 )
 from sim.road_graph import RoadGraph
 
@@ -147,6 +148,12 @@ def score_from_signals(signals: MatchSignals, config: CascadeConfig | None = Non
         score += W_GEOMETRY
         if tier == "none":
             tier = "attributes"
+    if signals.transit_in_window:
+        # Space-time is corroboration, not an identity tier — so it moves the
+        # score but never becomes the deciding tier. Being in the right place
+        # at the right time narrows the field without naming anyone in it,
+        # and the distinctiveness floor still governs whether we may.
+        score += W_TRANSIT_CONSISTENT
     if signals.has_gallery and score > 0 and not vetoed:
         # ReID only refines an already-supported candidate — never rescues one.
         score += W_REID_MAX * signals.reid_prob
@@ -201,6 +208,8 @@ def score_breakdown(signals: MatchSignals) -> dict[str, float]:
         out["instance_marks"] = W_INSTANCE_ATTR * signals.mark_match_count
     if signals.geometry_consistent:
         out["geometry"] = W_GEOMETRY
+    if signals.transit_in_window:
+        out["transit"] = W_TRANSIT_CONSISTENT
     if signals.has_gallery and sum(out.values()) > 0 and not signals.any_veto:
         out["reid"] = W_REID_MAX * signals.reid_prob
     return out

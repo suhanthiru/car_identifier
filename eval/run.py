@@ -363,12 +363,23 @@ def embedder_section() -> str:
             rec, imp = ops["recall"], ops["impostors"]
             rate = rec["rate"]
             fpr = imp["false_positive_rate"]
+            # Genuine passages the transit veto actively threw out. Counted
+            # from the traces because it is a cost of the space-time signal,
+            # not a neutral "no decision", and belongs beside its benefit.
+            rejected = sum(1 for v in ops.get("per_vehicle", [])
+                           for t in v.get("trace", [])
+                           if t.get("verdict") == "rejected")
+            evaluated = rec["evaluated_passages"] or 1
+            sc = imp["same_color"]
             rows_ops.append(
                 f"| {label} | {rec['proposed']}/{rec['evaluated_passages']} "
                 f"({0.0 if rate is None else rate * 100:.1f}%) | "
                 f"{imp['impostor_proposals']}/{imp['impostor_evaluations']} "
                 f"({0.0 if fpr is None else fpr * 100:.1f}%) | "
-                f"{imp['same_color']['proposals']}/{imp['same_color']['evaluations']} |")
+                f"{sc['proposals']}/{sc['evaluations']} "
+                f"({0.0 if sc['rate'] is None else sc['rate'] * 100:.1f}%) | "
+                f"{rejected}/{rec['evaluated_passages']} "
+                f"({100 * rejected / evaluated:.0f}%) |")
 
     if not (rows_sep or rows_retr or rows_ops):
         return _pending(
@@ -444,22 +455,46 @@ def embedder_section() -> str:
             "everything scores perfect recall. Impostors are sampled 2:1 toward "
             "the *same* estimated colour, because that is the hard case.",
             "",
-            "| embedder | recall (genuine passages) | FPR (impostor passages) | same-colour impostors |",
-            "|---|---|---|---|",
+            "| embedder | recall (genuine passages) | FPR (impostor passages) | same-colour impostors | genuine passages vetoed |",
+            "|---|---|---|---|---|",
             *rows_ops,
             "",
-            "Both embedders sit at the same degenerate corner: nothing "
-            "proposed, so precision is trivially perfect and recall is zero. "
-            "Since retrieval quality differs ~3x between them and this table "
-            "does not move at all, the binding constraint is not the embedder "
-            "— it is the cascade's scoring arithmetic. Colour contributes at "
-            "most `W_CLASS_ATTRS` (0.20) and appearance at most `W_REID_MAX` "
-            "(0.30) against a `LIKELY_THRESHOLD` of 0.45, so an "
-            "honestly-calibrated appearance signal cannot cross the bar on a "
-            "profile that has only colour plus appearance to work with, "
-            "however good the embedding becomes. Whether that ceiling should "
-            "change is a policy question, not a tuning one; this table is the "
-            "baseline any such change has to be measured against.",
+            "**Measured with space-time evidence enabled** "
+            "(`W_TRANSIT_CONSISTENT`). Before it, both embedders sat at the "
+            "same degenerate corner — 0/284 recall and 0/1032 FPR — despite a "
+            "~3x retrieval gap between them, which is what identified the "
+            "cascade's arithmetic rather than the embedder as the binding "
+            "constraint: colour (`W_CLASS_ATTRS` 0.20) plus appearance "
+            "(`W_REID_MAX` 0.30) could not clear `LIKELY_THRESHOLD` (0.45) on "
+            "an honestly-calibrated signal, however good the embedding got.",
+            "",
+            "Space-time breaks that because it is independent of pixels: "
+            "on this scenario it fires on 32% of real cross-camera hops and "
+            "narrows 95 candidate vehicles to a median of 4 "
+            "(P(same | in window) ≈ 0.28 against a ≈0.011 prior). Recall goes "
+            "0% → 17.6% for 2.1% same-colour false positives, and **every "
+            "proposal is a `candidate` verdict** — distinctiveness stays at "
+            "0.222, below the 0.30 floor, so the system offers a narrowed set "
+            "for review and never asserts an individual. Four co-plausible "
+            "vehicles is a set, and it says so.",
+            "",
+            "The last column is the cost, and it is not small: seeding "
+            "`last_seen` activates the transit *veto* as well as its positive "
+            "evidence, and that veto throws out ~30% of genuine passages. "
+            "`to_road_graph` drops negative gaps "
+            "(`datasets/cityflow.py`), so hops between cameras with "
+            "overlapping fields of view — real, and common here — read as "
+            "\"impossibly fast\". That is suppressed recall still on the "
+            "table, and a known next fix rather than a property of the data.",
+            "",
+            "Note what this table does NOT show: the two embedders land within "
+            "noise of each other on every operational column, despite the ~3x "
+            "retrieval gap in the section above. Both calibration curves map "
+            "their typical cross-camera similarity to p≈0.5, and `W_REID_MAX` "
+            "caps the result at 0.30, so each contributes ≈0.15 and the "
+            "outcome is decided by colour and space-time — neither of which "
+            "depends on the embedder. A better embedding is real (see "
+            "retrieval) and currently unspendable.",
             "",
         ]
     return "\n".join(out)

@@ -50,6 +50,11 @@ class MatchSignals:
     transit_fastest_s: float | None = None   # None for same-camera / no history
     transit_veto: bool = False
     no_path_veto: bool = False
+    # Landed at a directly-adjacent camera INSIDE the observed direct-hop
+    # window: positive space-time evidence, not merely "nothing ruled it
+    # out". Most sightings are un-vetoed simply because no rule fired; this
+    # is the much smaller set the physics actively supports.
+    transit_in_window: bool = False
     # geometry (coarse, caution/support only — never a veto)
     geometry_consistent: bool = False
     geometry_inconsistent: bool = False
@@ -116,6 +121,10 @@ def _transit_signals(obs: Observation, profile: TargetProfile, graph: RoadGraph)
     out["transit_fastest_s"] = fastest
     if dt < 0 or dt < fastest:
         out["transit_veto"] = True
+        return out
+    window = graph.transit_window(last.camera_id, obs.camera_id)
+    if window is not None and window[0] <= dt <= window[1]:
+        out["transit_in_window"] = True
     return out
 
 

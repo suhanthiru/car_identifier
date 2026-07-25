@@ -3,6 +3,8 @@
 Guards the refactor that replaced substring-matching of fact text with typed
 signals — the two must never drift.
 """
+import dataclasses
+
 import pytest
 
 from reasoning.facts import KIND_SUPPORT, has_veto
@@ -97,3 +99,60 @@ def test_plate_partial_match_with_contradiction_is_still_a_veto(graph):
     s = compute_signals(make_obs(plate="ABC-1_99", plate_conf=0.95), make_profile(), graph)
     assert not s.plate_partial_match
     assert s.plate_contradiction and s.any_veto
+
+
+# ------------------------------------------- space-time positive evidence
+
+def test_transit_in_window_only_fires_inside_the_observed_window(graph):
+    """`transit_in_window` must mean "physics actively supports this", not
+    merely "nothing vetoed it" -- most sightings are un-vetoed simply
+    because no rule fired, and scoring those would be scoring nothing."""
+    lo, hi = graph.transit_window("cam-n", "cam-ctr")
+    last = LastSeen("cam-n", 1000.0, "evt-0")
+    profile = make_profile(last_seen=last)
+
+    inside = compute_signals(
+        make_obs(camera_id="cam-ctr", t=1000.0 + (lo + hi) / 2), profile, graph)
+    assert inside.transit_in_window
+    assert not inside.transit_veto
+
+    # Too slow for a direct hop: possible, but not corroborated by physics.
+    too_slow = compute_signals(
+        make_obs(camera_id="cam-ctr", t=1000.0 + hi + 600.0), profile, graph)
+    assert not too_slow.transit_in_window
+    assert not too_slow.transit_veto
+
+    # Too fast: already a veto, and must not also claim positive support.
+    too_fast = compute_signals(
+        make_obs(camera_id="cam-ctr", t=1000.0 + 1.0), profile, graph)
+    assert too_fast.transit_veto
+    assert not too_fast.transit_in_window
+
+
+def test_transit_needs_a_prior_sighting_to_apply():
+    """The deadlock this signal was added to break: a freshly flagged target
+    with no last_seen gets no space-time evidence at all."""
+    from sim.road_graph import default_world
+
+    g = default_world()
+    signals = compute_signals(make_obs(camera_id="cam-ctr"), make_profile(), g)
+    assert not signals.transit_applicable
+    assert not signals.transit_in_window
+
+
+def test_transit_in_window_lifts_the_score_without_deciding_the_tier(graph):
+    """It must move the score (that is the point) but never become the
+    deciding tier, and never by itself let a class-only profile individuate."""
+    from reasoning.cascade import score_from_signals
+    from reasoning.weights import W_TRANSIT_CONSISTENT
+
+    lo, hi = graph.transit_window("cam-n", "cam-ctr")
+    profile = make_profile(last_seen=LastSeen("cam-n", 1000.0, "evt-0"))
+    obs = make_obs(camera_id="cam-ctr", t=1000.0 + (lo + hi) / 2, plate="")
+
+    signals = compute_signals(obs, profile, graph)
+    with_transit = score_from_signals(signals)
+    without = score_from_signals(dataclasses.replace(signals, transit_in_window=False))
+
+    assert with_transit.score == pytest.approx(without.score + W_TRANSIT_CONSISTENT)
+    assert with_transit.deciding_tier == without.deciding_tier

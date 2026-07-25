@@ -107,7 +107,14 @@ def analyze_vehicle(vid, spans, camera_dirs, graph, perceptor, cascade_config,
                     if multi_crop and obs0.clip_frames else (obs0.embedding,))
     profile = dataclasses.replace(
         profile_from_flag(f"v{vid}", f"vehicle {vid}", "", obs0.class_attrs, {}),
-        gallery=seed_gallery)
+        gallery=seed_gallery,
+        # A flag IS a sighting: the operator pointed at this vehicle on this
+        # camera at this time. Leaving last_seen unset (the old behaviour)
+        # silently disabled the whole space-time tier for every real-data
+        # target, and deadlocked it: last_seen is only written on
+        # association, association needs the score bar, and the score bar is
+        # what space-time was supposed to help clear.
+        last_seen=LastSeen(seed.camera_id, obs0.timestamp_s, obs0.event_id))
     if seed_cache is not None:
         # The pristine seeded profile, kept for the impostor pass so the
         # false-positive measurement is independent of how much the profile
