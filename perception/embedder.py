@@ -27,6 +27,14 @@ import numpy as np
 # Input size (height, width). OSNet is fully convolutional + global pooling,
 # so a wide vehicle aspect works fine.
 INPUT_H, INPUT_W = 128, 256
+# Crops are embedded in chunks rather than one giant batch: the eval and
+# calibration paths hand this thousands of crops at once, and materializing
+# them all cost ~600 MiB and died with an ArrayMemoryError on a machine with
+# GB to spare.
+BATCH_CHUNK = 64
+# float32 so normalization cannot silently promote each image to float64.
+_IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+_IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 
 
 class ReidEmbedder:
@@ -73,16 +81,22 @@ class ReidEmbedder:
 
         self._load()
         torch = self._torch
-        batch = []
-        for crop in crops_bgr:
-            rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
-            rgb = cv2.resize(rgb, (INPUT_W, INPUT_H)).astype(np.float32) / 255.0
-            # ImageNet normalization, matching torchreid's training transforms.
-            rgb = (rgb - (0.485, 0.456, 0.406)) / (0.229, 0.224, 0.225)
-            batch.append(rgb.transpose(2, 0, 1))
-        x = torch.from_numpy(np.stack(batch).astype(np.float32))
+        chunks = []
         with torch.no_grad():
-            feats = self._model(x).cpu().numpy().astype(np.float32)
+            for start in range(0, len(crops_bgr), BATCH_CHUNK):
+                batch = []
+                for crop in crops_bgr[start:start + BATCH_CHUNK]:
+                    rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
+                    rgb = cv2.resize(rgb, (INPUT_W, INPUT_H)).astype(np.float32) / 255.0
+                    # ImageNet normalization, matching torchreid's training
+                    # transforms. Mean/std are float32 arrays, not Python
+                    # float tuples: numpy would otherwise promote the whole
+                    # image to float64 and double the memory for nothing.
+                    rgb = (rgb - _IMAGENET_MEAN) / _IMAGENET_STD
+                    batch.append(rgb.transpose(2, 0, 1))
+                x = torch.from_numpy(np.stack(batch))
+                chunks.append(self._model(x).cpu().numpy())
+        feats = np.concatenate(chunks, axis=0).astype(np.float32)
         norms = np.linalg.norm(feats, axis=1, keepdims=True)
         return feats / np.maximum(norms, 1e-12)
 

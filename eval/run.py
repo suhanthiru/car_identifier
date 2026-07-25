@@ -468,24 +468,44 @@ def embedder_section() -> str:
             "(`W_REID_MAX` 0.30) could not clear `LIKELY_THRESHOLD` (0.45) on "
             "an honestly-calibrated signal, however good the embedding got.",
             "",
-            "Space-time breaks that because it is independent of pixels: "
-            "on this scenario it fires on 32% of real cross-camera hops and "
+            "Space-time breaks that because it is independent of pixels: it "
             "narrows 95 candidate vehicles to a median of 4 "
-            "(P(same | in window) ≈ 0.28 against a ≈0.011 prior). Recall goes "
-            "0% → 17.6% for 2.1% same-colour false positives, and **every "
+            "(P(same | in window) ≈ 0.28 against a ≈0.011 prior). **Every "
             "proposal is a `candidate` verdict** — distinctiveness stays at "
             "0.222, below the 0.30 floor, so the system offers a narrowed set "
             "for review and never asserts an individual. Four co-plausible "
             "vehicles is a set, and it says so.",
             "",
-            "The last column is the cost, and it is not small: seeding "
-            "`last_seen` activates the transit *veto* as well as its positive "
-            "evidence, and that veto throws out ~30% of genuine passages. "
-            "`to_road_graph` drops negative gaps "
-            "(`datasets/cityflow.py`), so hops between cameras with "
-            "overlapping fields of view — real, and common here — read as "
-            "\"impossibly fast\". That is suppressed recall still on the "
-            "table, and a known next fix rather than a property of the data.",
+            "Three defects were then found and fixed, measured in sequence on "
+            "the FastReID configuration:",
+            "",
+            "| stage | recall | FPR | same-colour FPR |",
+            "|---|---|---|---|",
+            "| space-time only | 17.6% | 1.6% | 2.1% |",
+            "| + transit-veto fix | 57.7% | 2.1% | 2.9% |",
+            "| + base-rate calibration | 52.1% | 0.5% | 0.7% |",
+            "",
+            "The **transit-veto fix** was the large one. `to_road_graph` was "
+            "discarding every transition with a negative exit→enter gap as "
+            "noise, but those are real vehicles reaching the next camera "
+            "before leaving the previous one's field of view — 74% of all "
+            "ground-truth transitions in S01. `min_s` was therefore built "
+            "from the non-overlapping minority, came out far too high, and "
+            "vetoed as impossible the very hops it had excluded (99% of "
+            "observed vetoes were passages overlapping in wall time). Keeping "
+            "them tripled recall for +0.8pt of same-colour FPR.",
+            "",
+            "The **calibration fix** traded recall for precision, and is kept "
+            "on those terms: fitting P(same) on `mine_pairs`' top-k sample "
+            "made look-alikes the bulk of the data, inverted the "
+            "similarity/identity relationship, and collapsed the isotonic fit "
+            "to a constant (~0.5 across the whole operating range) — an "
+            "appearance signal contributing the same value to every "
+            "candidate. Refitting on base-rate negatives "
+            "(`eval/separability.py:natural_population_pairs`) restores a "
+            "monotone curve, and the true:false proposal ratio improves from "
+            "164:22 to 148:5. Hard mining keeps its reporting role above; it "
+            "simply must not define P(same).",
             "",
             "Note what this table does NOT show: the two embedders land within "
             "noise of each other on every operational column, despite the ~3x "

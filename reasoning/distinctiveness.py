@@ -34,7 +34,12 @@ def distinctiveness(signals: MatchSignals) -> float:
     d += _MARK * signals.mark_match_count
     if signals.geometry_consistent:
         d += _GEOM
-    if not (signals.plate_near or signals.mark_match_count or signals.geometry_consistent) \
-            and signals.attrs_consistent:
-        d = max(d, _CLASS)   # class attributes alone: the low floor
+    if signals.attrs_consistent:
+        # Matching class attributes are a FLOOR, not an alternative branch.
+        # Guarding this on "no other signal fired" made evidence subtract:
+        # geometry (_GEOM 0.11) alongside matching attributes returned 0.11,
+        # BELOW the 0.222 those attributes alone are worth. Latent while
+        # CityFlow carries no geometry, but it would have silently weakened
+        # every target the moment 3D or physical-size attributes landed.
+        d = max(d, _CLASS)
     return min(1.0, d)

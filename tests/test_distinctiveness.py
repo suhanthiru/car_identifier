@@ -79,3 +79,22 @@ def test_plate_never_refused_even_at_high_floor(graph):
     cfg = CascadeConfig(distinctiveness_floor=0.99)
     d = evaluate(make_obs(plate="ABC-1234"), make_profile(), graph, cfg)
     assert d.verdict == VERDICT_CONFIRMED, "a plate match is distinctiveness 1.0"
+
+
+def test_class_attrs_are_a_floor_not_an_alternative_branch():
+    """Adding evidence must never lower distinctiveness.
+
+    Geometry consistency alongside matching class attributes used to return
+    _GEOM (0.11) — below the 0.222 the attributes alone are worth — because
+    the class floor was skipped whenever any other signal fired.
+    """
+    from reasoning.distinctiveness import distinctiveness
+    from reasoning.signals import MatchSignals
+
+    attrs_only = MatchSignals(attrs_consistent=True)
+    attrs_and_geometry = MatchSignals(attrs_consistent=True, geometry_consistent=True)
+
+    assert distinctiveness(attrs_and_geometry) >= distinctiveness(attrs_only)
+    # And a mark still lifts it well clear of the class-only floor.
+    with_mark = MatchSignals(attrs_consistent=True, mark_match_count=1)
+    assert distinctiveness(with_mark) > distinctiveness(attrs_only)

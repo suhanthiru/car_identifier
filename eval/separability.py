@@ -210,6 +210,43 @@ def topk_bucket_negatives(
     return out
 
 
+def natural_population_pairs(
+    records, embeddings: np.ndarray, per_id: int = 6,
+    negatives_per_positive: int = 3, seed: int = 17,
+) -> list[MinedPair]:
+    """Pairs at the base rate a deployed target actually faces.
+
+    The calibration sample from `eval/hard_negatives.py:mine_pairs` takes the
+    top-k MOST SIMILAR cross-identity pairs per bucket. That is the right
+    sample for measuring the confusable tail, and the wrong one for fitting
+    P(same): it over-represents look-alikes so heavily that within it, higher
+    similarity genuinely predicts "different vehicle". Isotonic regression can
+    only emit a non-decreasing curve, so fed that sample it collapses to a
+    CONSTANT — which is exactly what the serving curves did (flat 0.499 across
+    the whole operating range), making the appearance signal contribute the
+    same amount to every candidate and discriminate nothing.
+
+    Here negatives are drawn uniformly from every OTHER vehicle, so
+    look-alikes appear at their true frequency rather than a mined one.
+    Confusable pairs are still present — they are simply no longer the
+    majority of the sample. Deleting them outright would swing the curve to
+    the opposite error (over-confident on precisely the pairs that matter).
+    """
+    rng = np.random.default_rng(seed)
+    ids = np.asarray([r.vehicle_id for r in records])
+    pairs = positive_pairs(records, embeddings, cross_camera=True,
+                           per_id=per_id, seed=seed)
+
+    n = len(records)
+    for _ in range(len(pairs) * negatives_per_positive):
+        i, j = int(rng.integers(n)), int(rng.integers(n))
+        if ids[i] == ids[j]:
+            continue
+        pairs.append(_pair(embeddings, i, j, same_vehicle=False,
+                           hard_negative=False, bucket=_bucket_of(records[i])))
+    return pairs
+
+
 def evaluate_separability(
     records, embeddings: np.ndarray, per_id: int = 6, per_bucket: int = 40,
     seed: int = 11,

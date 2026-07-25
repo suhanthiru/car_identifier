@@ -30,6 +30,10 @@ DEFAULT_FPS = 10.0
 # Real-graph windows get this much slack beyond the widest observed hop —
 # one measurement is not "the slowest this could ever be."
 REAL_WINDOW_BUFFER_S = 5.0
+# Smallest min_s an edge may carry. RoadGraph requires min_s > 0 so that the
+# time-travel veto stays meaningful on genuinely disjoint camera pairs; for
+# pairs whose fields of view overlap this is simply "no measurable minimum".
+MIN_EDGE_S = 0.1
 
 # AIC22's own ReadMe.txt is explicit: "we do not have access to the exact
 # GPS location of each camera, the GPS location for the approximate center
@@ -190,10 +194,19 @@ class CityFlowScenario:
             for cam, (lat, lon) in sorted(gps.items())
         )
 
+        # Negative exit->enter gaps are NOT annotation noise: they are real
+        # vehicles reaching the next camera before leaving the previous
+        # camera's field of view. In S01 that is 74% of all ground-truth
+        # transitions, and dropping them was self-defeating — min_s ended up
+        # built from the non-overlapping minority, came out far too high, and
+        # then vetoed as "physically impossible" the very hops it had
+        # excluded (99% of observed vetoes were passages overlapping in wall
+        # time). Keep them, and let a pair with observed overlap say what it
+        # actually observed: the minimum transit here is effectively zero.
         by_pair: dict[tuple[str, str], list[float]] = {}
         for t in self.transitions():
-            if t.elapsed_s < 0 or t.from_camera not in gps or t.to_camera not in gps:
-                continue  # negative gaps are fov overlap, not travel time
+            if t.from_camera not in gps or t.to_camera not in gps:
+                continue
             by_pair.setdefault((t.from_camera, t.to_camera), []).append(t.elapsed_s)
 
         edges = []
@@ -204,7 +217,13 @@ class CityFlowScenario:
             lat1, lon1 = gps[src]
             lat2, lon2 = gps[dst]
             distance_m = haversine_m(lat1, lon1, lat2, lon2) * road_factor
-            min_s = max(0.1, lo)
+            # For a pair with observed overlap `lo` is now negative, so this
+            # collapses to the floor — "no meaningful minimum travel time
+            # here" — instead of the inflated value the non-overlapping
+            # minority used to produce. The floor stays positive because
+            # RoadGraph requires min_s > 0 to keep the genuine time-travel
+            # veto meaningful for camera pairs that really are disjoint.
+            min_s = max(MIN_EDGE_S, lo)
             max_s = max(hi, min_s) + REAL_WINDOW_BUFFER_S
             typical_s = min(max(typical, min_s), max_s)
             edges.append(TransitEdge(

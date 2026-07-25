@@ -149,10 +149,19 @@ async def run_cityflow_feed(
     camera_positions: dict[str, tuple[float, float]],
     pipeline_state: object,
     cfg: CityFlowFeedConfig | None = None,
+    embedder=None,
 ) -> dict[str, int]:
-    """Replay every vehicle in `scenario` across its real cameras."""
+    """Replay every vehicle in `scenario` across its real cameras.
+
+    `embedder` defaults to RealPerceptor's own (OSNet). Pass a
+    FastReidEmbedder to run the vehicle-finetuned backbone instead — it
+    retrieves far better (see RESULTS.md) but is much heavier per crop, so
+    the default stays OSNet for a console that has to keep up with a replay.
+    Whichever is used must match the calibration artifact the server loaded.
+    """
     cfg = cfg or CityFlowFeedConfig()
-    perceptor = RealPerceptor(camera_dirs, camera_positions, pipeline_state)
+    perceptor = RealPerceptor(camera_dirs, camera_positions, pipeline_state,
+                              embedder=embedder)
     by_camera = _passages_by_camera(scenario, camera_dirs)
     all_ts = [p.timestamp_s for passages in by_camera.values() for p in passages]
     t0 = min(all_ts, default=0.0)

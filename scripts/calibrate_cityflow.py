@@ -1,15 +1,23 @@
 """Per-deployment ReID calibration for a CityFlow scenario.
 
-    python scripts/calibrate_cityflow.py [--scenario S01]
+    python scripts/calibrate_cityflow.py [--scenario S01] [--embedder osnet|fastreid]
 
 The project's rule is that a similarity->P(same) map is only valid for the
 deployment it was fitted on: the synthetic artifact maps real same-car
 similarities (~0.8) to p~0, and the VeRi-fitted curve answers a different
 dataset's question. This script fits the CityFlow answer from the
 scenario's own ground truth: it crops every (vehicle, camera) passage at
-two points, embeds them with the same OSNet backbone the live console
-uses, mines positives + same-estimated-color hard negatives, and saves an
-isotonic artifact that scripts/run_cityflow_console.py auto-loads.
+two points, embeds them with the same backbone the live console uses, and
+saves an isotonic artifact that scripts/run_cityflow_console.py auto-loads.
+
+The pair sample is deliberately BASE-RATE, not hard-mined. An earlier
+version fitted on eval/hard_negatives.py:mine_pairs, whose top-k selection
+made look-alikes the bulk of the sample; within it higher similarity
+predicted "different vehicle", and since isotonic regression can only emit
+a non-decreasing curve it collapsed to a constant (~0.5 across the whole
+operating range). Appearance then contributed an identical amount to every
+candidate and discriminated nothing. Hard mining still drives the
+separability reporting in RESULTS.md — it just must not define P(same).
 
 Ground-truth identity is used HERE (fitting an offline calibration, the
 sanctioned use) and never on the serving path.
@@ -31,9 +39,10 @@ from datasets.cityflow_video import (
     VideoFrameSource, bbox_for, discover_camera_dirs, vehicle_frame_spans,
 )
 from datasets.config import cityflow_root
-from eval.hard_negatives import mine_pairs
+from eval.separability import natural_population_pairs
 from perception.attributes import estimate_color
 from perception.embedder import ReidEmbedder
+from perception.fastreid_backbone import FastReidEmbedder
 
 ARTIFACT_DIR = Path("calibration/artifacts")
 
@@ -50,8 +59,9 @@ class _CropRecord:
     body_type: str = "vehicle"
 
 
-def artifact_path(scenario: str) -> Path:
-    return ARTIFACT_DIR / f"cityflow_{scenario.lower()}.json"
+def artifact_path(scenario: str, embedder: str = "osnet") -> Path:
+    suffix = "" if embedder == "osnet" else f"_{embedder}"
+    return ARTIFACT_DIR / f"cityflow_{scenario.lower()}{suffix}.json"
 
 
 def collect_crops(scenario, camera_dirs) -> tuple[list[_CropRecord], list[np.ndarray]]:
@@ -84,6 +94,7 @@ def collect_crops(scenario, camera_dirs) -> tuple[list[_CropRecord], list[np.nda
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--scenario", default="S01")
+    parser.add_argument("--embedder", choices=["osnet", "fastreid"], default="osnet")
     args = parser.parse_args()
 
     root = cityflow_root()
@@ -94,19 +105,32 @@ def main() -> None:
 
     records, crops = collect_crops(scenario, camera_dirs)
     print(f"{args.scenario}: {len(crops)} real crops across "
-          f"{len({r.vehicle_id for r in records})} vehicles")
-    embeddings = ReidEmbedder().embed_batch(crops)
+          f"{len({r.vehicle_id for r in records})} vehicles, "
+          f"embedder={args.embedder}")
+    embedder = (FastReidEmbedder() if args.embedder == "fastreid"
+                else ReidEmbedder())
+    embeddings = embedder.embed_batch(crops)
 
-    pairs = mine_pairs(records, embeddings)
+    # Base-rate sample, NOT the top-k mined one. mine_pairs is still the
+    # right tool for reporting the confusable tail (see eval/separability.py
+    # and the RESULTS separability table), but fitting P(same) on it made
+    # look-alikes the majority of the sample, inverted the similarity/identity
+    # relationship, and collapsed the isotonic fit to a constant — an
+    # appearance signal that contributed the same value to every candidate.
+    pairs = natural_population_pairs(records, embeddings)
     n_pos = sum(p.same_vehicle for p in pairs)
-    print(f"mined {len(pairs)} pairs ({n_pos} positives, "
-          f"{sum(p.hard_negative for p in pairs)} hard negatives)")
+    print(f"{len(pairs)} base-rate pairs ({n_pos} cross-camera positives, "
+          f"{len(pairs) - n_pos} negatives sampled uniformly over all "
+          f"other vehicles)")
     report = build_report(pairs, note=(
         f"Calibrated on CityFlow {args.scenario} ground-truth crops (real "
-        f"footage, this deployment's own cameras): measures this embedder's "
-        f"confusability HERE. Not transferable to other scenarios or "
-        f"datasets."))
-    out = artifact_path(args.scenario)
+        f"footage, this deployment's own cameras) with {args.embedder} "
+        f"embeddings. Cross-camera positives against negatives drawn at their "
+        f"natural base rate, so look-alikes appear as often as they really do "
+        f"— fitting on top-k mined negatives instead collapses the isotonic "
+        f"curve to a constant. Not transferable to other scenarios, datasets "
+        f"or embedders."))
+    out = artifact_path(args.scenario, args.embedder)
     save(report, out)
     print(f"saved {out} (version {report.model.version}, "
           f"chosen_threshold {report.chosen_threshold:.2f})")

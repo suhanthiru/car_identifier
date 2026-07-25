@@ -51,7 +51,7 @@ def reset_demo_data() -> Path:
 
 def start_server(
     port: int, db_path: Path, root: Path, scenario_name: str, enable_plate_ocr: bool,
-    graph,
+    graph, embedder_name: str = "osnet",
 ) -> tuple[uvicorn.Server, object]:
     from server.api import create_app
 
@@ -62,7 +62,9 @@ def start_server(
     # scripts/calibrate_cityflow.py); otherwise the honest fallback -- every
     # fact then cites "uncalibrated-linear" instead of silently transferring
     # a foreign curve.
-    calibration = Path(f"calibration/artifacts/cityflow_{scenario_name.lower()}.json")
+    cal_suffix = "" if embedder_name == "osnet" else f"_{embedder_name}"
+    calibration = Path(
+        f"calibration/artifacts/cityflow_{scenario_name.lower()}{cal_suffix}.json")
     calibration_path = str(calibration) if calibration.is_file() else ""
     fallback_note = ("uncalibrated-linear fallback "
                      "(run scripts/calibrate_cityflow.py to fit this scenario)")
@@ -103,6 +105,9 @@ def main() -> None:
                         help="start with plate OCR off (still toggleable live "
                              "via POST /api/pipeline_config)")
     parser.add_argument("--keep-db", action="store_true")
+    parser.add_argument("--embedder", choices=["osnet", "fastreid"],
+                        default="osnet",
+                        help="appearance backbone. osnet (default) is fast enough to keep up with the replay; fastreid retrieves far better but is much heavier per crop. Must match a calibration artifact fitted on the same backbone.")
     args = parser.parse_args()
 
     root = cityflow_root()
@@ -125,7 +130,8 @@ def main() -> None:
 
     base = f"http://127.0.0.1:{args.port}"
     server, app_state = start_server(args.port, db_path, root, args.scenario,
-                                     enable_plate_ocr=not args.no_plate_ocr, graph=graph)
+                                     enable_plate_ocr=not args.no_plate_ocr, graph=graph,
+                                     embedder_name=args.embedder)
     wait_for_server(base)
     print(f"server up at {base} (world_source=real, plate_ocr="
           f"{'on' if not args.no_plate_ocr else 'off'})")
@@ -138,9 +144,14 @@ def main() -> None:
     # live app.state.enable_plate_ocr directly -- POST /api/pipeline_config
     # mutates that same object, so a toggle takes effect on the very next
     # sighting, no polling needed.
+    embedder = None
+    if args.embedder == "fastreid":
+        from perception.fastreid_backbone import FastReidEmbedder
+        embedder = FastReidEmbedder()
     counts = asyncio.run(run_cityflow_feed(
         scenario, camera_dirs, scenario.camera_gps(), app_state,
-        CityFlowFeedConfig(base_url=base, time_scale=args.time_scale)))
+        CityFlowFeedConfig(base_url=base, time_scale=args.time_scale),
+        embedder=embedder))
     print(f"feed complete: {sum(counts.values())} sightings across "
           f"{len(counts)} cameras")
     print("console stays live for review-queue work — ctrl+c to quit")
