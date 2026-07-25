@@ -122,11 +122,12 @@ async function flagCityflowVehicle(v) {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       label: `vehicle ${v.vehicle_id} (real, first seen ${v.first_camera})`,
-      // The clicked thumbnail is a real crop of this exact car — the server
-      // seeds its pixel color + one appearance embedding per passage crop,
-      // which is what lets the feed's later sightings of this car actually
-      // match (the pose changes across a passage, so one frame is not enough).
-      reference_crop_b64: v.thumbnail_b64 || "",
+      // Seed from the FULL-RESOLUTION passage crops, not the thumbnail:
+      // thumbnail_b64 is downscaled for the grid and would hand the
+      // appearance model a blurrier car than the sightings it must match
+      // later. gallery_b64[0] is that same first frame at full size, and the
+      // rest cover the pose change across the passage.
+      reference_crop_b64: (v.gallery_b64 && v.gallery_b64[0]) || v.thumbnail_b64 || "",
       reference_gallery_b64: v.gallery_b64 || [],
     }),
   });
