@@ -48,8 +48,15 @@ from perception.fastreid_backbone import FastReidEmbedder
 from perception.plates import FastPlateOcrReader
 from perception.real_observe import RealPerceptor
 from reasoning.cascade import (
-    VERDICT_REJECTED, VERDICT_UNDECIDED, CascadeConfig, evaluate,
+    VERDICT_CANDIDATE, VERDICT_CONFIRMED, VERDICT_LIKELY, VERDICT_REJECTED,
+    VERDICT_UNDECIDED, CascadeConfig, evaluate,
 )
+
+# Verdicts that would actually surface to an operator as a proposed match.
+# REJECTED is deliberately excluded: on a true passage it is a miss, and on
+# an impostor it is the system correctly saying no -- lumping it in with
+# "reacted" hides both.
+PROPOSING_VERDICTS = (VERDICT_LIKELY, VERDICT_CONFIRMED, VERDICT_CANDIDATE)
 from reasoning.profile import LastSeen, profile_from_flag
 
 
@@ -81,7 +88,7 @@ def _aggregate_query_embedding(embedder, obs) -> np.ndarray:
 
 
 def analyze_vehicle(vid, spans, camera_dirs, graph, perceptor, cascade_config,
-                    embedder, multi_crop: bool):
+                    embedder, multi_crop: bool, obs_cache=None, seed_cache=None):
     spans = sorted(spans, key=lambda s: s.enter_s)
     seed = spans[0]
     seed_frames = vehicle_frame_spans(camera_dirs[seed.camera_id] / "gt" / "gt.txt")
@@ -101,8 +108,13 @@ def analyze_vehicle(vid, spans, camera_dirs, graph, perceptor, cascade_config,
     profile = dataclasses.replace(
         profile_from_flag(f"v{vid}", f"vehicle {vid}", "", obs0.class_attrs, {}),
         gallery=seed_gallery)
+    if seed_cache is not None:
+        # The pristine seeded profile, kept for the impostor pass so the
+        # false-positive measurement is independent of how much the profile
+        # happened to evolve during the recall pass.
+        seed_cache[vid] = (profile, obs0.class_attrs.get("color", ""))
 
-    evaluated, reacted = 0, 0
+    evaluated, reacted, proposed = 0, 0, 0
     cameras_reacted: set[str] = set()
     trace: list[dict] = []
     for span in spans[1:]:
@@ -119,6 +131,11 @@ def analyze_vehicle(vid, spans, camera_dirs, graph, perceptor, cascade_config,
         if multi_crop:
             query_emb = _aggregate_query_embedding(embedder, obs)
             query_obs = dataclasses.replace(obs, embedding=query_emb)
+        if obs_cache is not None:
+            # Drop the pixel payload: the impostor pass only re-runs
+            # evaluate(), which needs the embedding/attrs/plate, not images.
+            obs_cache[(vid, span.camera_id)] = dataclasses.replace(
+                query_obs, crop=None, clip_frames=())
         decision = evaluate(query_obs, profile, graph, cascade_config)
         trace.append({
             "camera": span.camera_id, "t": round(span.enter_s, 1),
@@ -126,6 +143,8 @@ def analyze_vehicle(vid, spans, camera_dirs, graph, perceptor, cascade_config,
             "distinctiveness": round(decision.distinctiveness, 3),
             "refused_to_individuate": decision.refused_to_individuate,
         })
+        if decision.verdict in PROPOSING_VERDICTS:
+            proposed += 1
         if decision.verdict != VERDICT_UNDECIDED:
             reacted += 1
             cameras_reacted.add(span.camera_id)
@@ -143,11 +162,75 @@ def analyze_vehicle(vid, spans, camera_dirs, graph, perceptor, cascade_config,
         "seed_camera": seed.camera_id,
         "evaluated_subsequent_passages": evaluated,
         "reacted_subsequent_passages": reacted,
+        "proposed_subsequent_passages": proposed,
         "distinct_cameras_reacted": len(cameras_reacted),
         "distinct_cameras_including_seed": len(cameras_reacted | {seed.camera_id}),
         "final_gallery_size": len(profile.gallery),
         "final_plate": profile.plate,
         "trace": trace,
+    }
+
+
+def impostor_pass(seed_cache, obs_cache, graph, cascade_config,
+                  per_vehicle: int = 12, seed: int = 17) -> dict:
+    """False-positive rate: does a target's profile propose matches against
+    OTHER vehicles' passages?
+
+    Without this axis the recall number is uninterpretable -- a 0% reaction
+    rate scores identically to a perfect system and to one that has simply
+    stopped working, and any change that makes the system react to
+    everything would read as progress.
+
+    Impostors are sampled with a deliberate bias toward the SAME estimated
+    color as the target, because that is the hard case; sampling uniformly
+    would mostly draw obviously-different vehicles and flatter the result.
+    Same-color and different-color rates are reported separately so the
+    bias cannot hide inside a single averaged number.
+    """
+    rng = np.random.default_rng(seed)
+    colors = {vid: color for vid, (_, color) in seed_cache.items()}
+
+    totals = {"same_color": [0, 0], "diff_color": [0, 0]}   # [evaluations, proposals]
+    worst: list[dict] = []
+    for vid, (profile, color) in sorted(seed_cache.items()):
+        others = [k for k in obs_cache if k[0] != vid]
+        same = [k for k in others if colors.get(k[0]) == color]
+        diff = [k for k in others if colors.get(k[0]) != color]
+        # Two thirds of the budget on same-color impostors, but never more
+        # than exist; the remainder from the easy pool as a control.
+        n_same = min(len(same), (per_vehicle * 2) // 3)
+        n_diff = min(len(diff), per_vehicle - n_same)
+        picked = (
+            [same[int(i)] for i in rng.choice(len(same), n_same, replace=False)]
+            + [diff[int(i)] for i in rng.choice(len(diff), n_diff, replace=False)]
+        )
+        for key in picked:
+            bucket = "same_color" if colors.get(key[0]) == color else "diff_color"
+            decision = evaluate(obs_cache[key], profile, graph, cascade_config)
+            totals[bucket][0] += 1
+            if decision.verdict in PROPOSING_VERDICTS:
+                totals[bucket][1] += 1
+                worst.append({
+                    "target_vehicle": vid, "impostor_vehicle": key[0],
+                    "impostor_camera": key[1], "verdict": decision.verdict,
+                    "score": round(decision.score, 3), "bucket": bucket,
+                })
+
+    evaluations = totals["same_color"][0] + totals["diff_color"][0]
+    proposals = totals["same_color"][1] + totals["diff_color"][1]
+    def _rate(pair):
+        return round(pair[1] / pair[0], 4) if pair[0] else None
+    return {
+        "impostor_evaluations": evaluations,
+        "impostor_proposals": proposals,
+        "false_positive_rate": round(proposals / evaluations, 4) if evaluations else None,
+        "same_color": {"evaluations": totals["same_color"][0],
+                       "proposals": totals["same_color"][1],
+                       "rate": _rate(totals["same_color"])},
+        "diff_color": {"evaluations": totals["diff_color"][0],
+                       "proposals": totals["diff_color"][1],
+                       "rate": _rate(totals["diff_color"])},
+        "examples": sorted(worst, key=lambda w: -w["score"])[:15],
     }
 
 
@@ -203,6 +286,9 @@ def main() -> None:
                         help="mean-pool query frames + multi-entry gallery "
                              "from each passage's real clip frames, instead "
                              "of a single midpoint crop")
+    parser.add_argument("--impostors-per-vehicle", type=int, default=12,
+                        help="impostor passages evaluated per target for the "
+                             "false-positive rate (2/3 same-color, the hard case)")
     args = parser.parse_args()
 
     root = cityflow_root()
@@ -227,17 +313,21 @@ def main() -> None:
 
     t0 = time.monotonic()
     results = []
+    obs_cache: dict[tuple[int, str], object] = {}
+    seed_cache: dict[int, tuple] = {}
     try:
         for vid, spans in sorted(by_vehicle.items()):
             r = analyze_vehicle(vid, spans, camera_dirs, graph, perceptor,
-                               cascade_config, embedder, args.multi_crop)
+                               cascade_config, embedder, args.multi_crop,
+                               obs_cache=obs_cache, seed_cache=seed_cache)
             if r is not None:
                 results.append(r)
             else:
                 results.append({
                     "vehicle_id": vid, "total_ground_truth_passages": len(spans),
                     "seed_camera": None, "evaluated_subsequent_passages": 0,
-                    "reacted_subsequent_passages": 0, "distinct_cameras_reacted": 0,
+                    "reacted_subsequent_passages": 0,
+                    "proposed_subsequent_passages": 0, "distinct_cameras_reacted": 0,
                     "distinct_cameras_including_seed": 0, "final_gallery_size": 0,
                     "final_plate": "", "trace": [],
                 })
@@ -245,12 +335,52 @@ def main() -> None:
         perceptor.close()
     print(f"analyzed {len(results)} vehicles in {time.monotonic() - t0:.0f}s")
 
+    # Precision axis. Cheap: re-runs evaluate() over cached observations, no
+    # video decoding or re-embedding.
+    impostors = impostor_pass(seed_cache, obs_cache, graph, cascade_config,
+                              per_vehicle=args.impostors_per_vehicle)
+
     summarize(results)
+
+    # Recall and false-positive rate must be read together: either alone is
+    # trivially optimizable in the wrong direction.
+    evaluated = sum(r["evaluated_subsequent_passages"] for r in results)
+    proposed = sum(r["proposed_subsequent_passages"] for r in results)
+    print(f"\n--- two-sided operational metric ---")
+    print(f"RECALL   : {proposed}/{evaluated} genuine cross-camera passages "
+          f"produced a proposed match "
+          f"({100 * proposed / evaluated:.1f}%)" if evaluated else
+          "RECALL   : no evaluable passages")
+    fpr = impostors["false_positive_rate"]
+    print(f"PRECISION: {impostors['impostor_proposals']}/"
+          f"{impostors['impostor_evaluations']} impostor passages falsely "
+          f"proposed ({100 * fpr:.1f}% FPR)" if fpr is not None else
+          "PRECISION: no impostor evaluations")
+    for bucket, label in (("same_color", "same estimated color (hard)"),
+                          ("diff_color", "different color (control)")):
+        b = impostors[bucket]
+        if b["rate"] is not None:
+            print(f"    {label:<28}: {b['proposals']}/{b['evaluations']} "
+                  f"({100 * b['rate']:.1f}%)")
+    if impostors["examples"]:
+        print(f"  worst false proposals:")
+        for e in impostors["examples"][:5]:
+            print(f"    target v{e['target_vehicle']} <- impostor "
+                  f"v{e['impostor_vehicle']} @{e['impostor_camera']} "
+                  f"score {e['score']} ({e['verdict']}, {e['bucket']})")
+
     suffix = "" if args.embedder == "osnet" else f"_{args.embedder}"
     if args.multi_crop:
         suffix += "_multicrop"
     out = Path(f"data/recognizability_{args.scenario.lower()}{suffix}.json")
-    out.write_text(json.dumps(results, indent=2))
+    out.write_text(json.dumps({
+        "scenario": args.scenario, "embedder": args.embedder,
+        "multi_crop": args.multi_crop,
+        "recall": {"evaluated_passages": evaluated, "proposed": proposed,
+                   "rate": round(proposed / evaluated, 4) if evaluated else None},
+        "impostors": impostors,
+        "per_vehicle": results,
+    }, indent=2))
     print(f"\nfull per-vehicle traces: {out}")
 
 

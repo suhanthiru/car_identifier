@@ -43,24 +43,9 @@ from eval.plots import (
     plot_pr_sweep, plot_reliability, plot_similarity_distributions,
 )
 from eval.reliability import compute_reliability
+from eval.separability import evaluate_separability, separability_auc
 from perception.embedder import ReidEmbedder
 from perception.fastreid_backbone import FastReidEmbedder
-
-
-def separability_auc(positive_sims: list[float], negative_sims: list[float]) -> float:
-    """Fraction of (positive, negative) pairs where positive > negative --
-    the Mann-Whitney U statistic, equivalent to ROC-AUC for this binary
-    separation task. Independent of any threshold or fit."""
-    pos = np.asarray(positive_sims)
-    neg = np.asarray(negative_sims)
-    # O(n log n) via rank-sum instead of the O(n*m) double loop.
-    combined = np.concatenate([pos, neg])
-    order = np.argsort(combined)
-    ranks = np.empty_like(order, dtype=float)
-    ranks[order] = np.arange(1, len(combined) + 1)
-    pos_rank_sum = ranks[: len(pos)].sum()
-    u = pos_rank_sum - len(pos) * (len(pos) + 1) / 2
-    return float(u / (len(pos) * len(neg)))
 
 
 def bootstrap_stability(pairs, n_boot: int = 8, seed: int = 0) -> list[dict]:
@@ -105,6 +90,9 @@ def main() -> None:
                         help="osnet = current default (ImageNet-pretrained, "
                              "never vehicle-finetuned); fastreid = VeRi-776 "
                              "vehicle-ReID-finetuned checkpoint")
+    parser.add_argument("--per-bucket", type=int, default=40,
+                        help="negatives sampled per appearance bucket in the "
+                             "fair/adversarial separability protocols")
     args = parser.parse_args()
 
     root = cityflow_root()
@@ -139,9 +127,35 @@ def main() -> None:
 
     auc_hard = separability_auc(pos_sims, hard_sims)
     auc_random = separability_auc(pos_sims, rand_sims)
-    print(f"\nseparability (AUC, 0.5=no separation, 1.0=perfect):")
+    print(f"\nseparability of the CALIBRATION sample "
+          f"(AUC, 0.5=no separation, 1.0=perfect):")
     print(f"  positives vs hard negatives (same color/body bucket): {auc_hard:.3f}")
     print(f"  positives vs random negatives (any bucket):           {auc_random:.3f}")
+    print(f"  NOTE: these use mine_pairs' calibration sample -- top-k mined")
+    print(f"  negatives vs uniformly-sampled positives. Right for FITTING the")
+    print(f"  curve, biased for JUDGING the embedder. See the fair split below.")
+
+    # The honest embedder judgement: cross-camera positives (the real task)
+    # against uniformly-sampled same-bucket negatives, with the top-k number
+    # reported beside it so the selection bias is visible rather than implied.
+    sep, sep_pairs = evaluate_separability(records, embeddings,
+                                           per_bucket=args.per_bucket)
+    sep_summary = sep.summary()
+    print(f"\nseparability, FAIR vs ADVERSARIAL protocols "
+          f"(eval/separability.py):")
+    print(f"  fair        (cross-camera positives vs uniform same-bucket "
+          f"negatives): {sep_summary['fair_auc']:.3f}")
+    print(f"  adversarial (cross-camera positives vs top-k mined "
+          f"negatives):   {sep_summary['adversarial_auc']:.3f}")
+    if sep_summary["same_camera_auc"] is not None:
+        print(f"  same-camera ceiling (near-duplicate frames, sanity check):     "
+              f"{sep_summary['same_camera_auc']:.3f}")
+    print(f"  look-alike difficulty gap (fair - adversarial):                "
+          f"{sep_summary['difficulty_gap']:.3f}")
+    print(f"  [{sep_summary['n_cross_camera_positives']} cross-camera positives, "
+          f"{sep_summary['n_same_camera_positives']} same-camera, "
+          f"{sep_summary['n_uniform_negatives']} uniform negatives, "
+          f"{sep_summary['n_topk_negatives']} top-k negatives]")
 
     print(f"\nbootstrap stability (refit on subsamples, compare to full fit):")
     stability = bootstrap_stability(pairs)
@@ -165,10 +179,33 @@ def main() -> None:
         pos_sims, hard_sims, rand_sims, f"cityflow_{tag}_similarity_dist.png",
         f"CityFlow {args.scenario}: raw similarity separability "
         f"(AUC vs hard negatives = {auc_hard:.2f})")
+    # Same three-way plot under the fair protocol, so the two pictures can be
+    # put side by side: identical embeddings, different negative selection.
+    fair_dist_path = plot_similarity_distributions(
+        [p.similarity for p in sep_pairs["cross_camera_positives"]],
+        [p.similarity for p in sep_pairs["topk_negatives"]],
+        [p.similarity for p in sep_pairs["uniform_negatives"]],
+        f"cityflow_{tag}_fair_dist.png",
+        f"CityFlow {args.scenario}: cross-camera positives "
+        f"(fair AUC {sep_summary['fair_auc']:.2f} / adversarial {sep_summary['adversarial_auc']:.2f})")
     rel_path = plot_reliability(rel.bins, rel.ece, f"cityflow_{tag}_reliability.png")
     sweep_path = plot_pr_sweep(report.sweep, report.chosen_threshold,
                                f"cityflow_{tag}_sweep.png")
-    print(f"\nplots written: {dist_path}, {rel_path}, {sweep_path}")
+    print(f"\nplots written: {dist_path}, {fair_dist_path}, {rel_path}, {sweep_path}")
+
+    summary_path = Path(f"data/separability_{tag}.json")
+    summary_path.write_text(json.dumps({
+        "scenario": args.scenario, "embedder": args.embedder,
+        "n_crops": len(crops), "n_vehicles": len({r.vehicle_id for r in records}),
+        "calibration_sample": {
+            "auc_vs_hard_negatives": round(auc_hard, 4),
+            "auc_vs_random_negatives": round(auc_random, 4),
+        },
+        "fair_protocol": sep_summary,
+        "reliability_ece": round(rel.ece, 4),
+        "chosen_threshold": round(report.chosen_threshold, 4),
+    }, indent=1))
+    print(f"separability summary: {summary_path}")
 
     pairs_out = Path(f"data/cityflow_{tag}_pairs.json")
     pairs_out.write_text(json.dumps([

@@ -1,6 +1,6 @@
 {
  "version": "5b5046ab06",
- "note": "Calibrated on synthetic sprite pairs: this measures the simulator's appearance distribution, not real-world ReID accuracy.",
+ "note": "Calibrated on VeRi-776 gallery pairs (real vehicle crops): measures this embedder's confusability on that dataset \u2014 it does not transfer to other deployments (see eval/generalization notes).",
  "x": [
   0.2595194876194,
   0.26650381535291673,

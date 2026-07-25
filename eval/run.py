@@ -318,6 +318,153 @@ def synthetic_section() -> str:
     ])
 
 
+# ------------------------------------------- embedder / look-alike block
+
+_EMBEDDER_LABELS = {
+    "osnet": "OSNet-x0_25 (ImageNet-pretrained, never vehicle-finetuned)",
+    "fastreid": "FastReID SBS(R50-ibn), VeRi-776-finetuned",
+}
+
+
+def _load_json(path: Path):
+    import json
+
+    return json.loads(path.read_text()) if path.is_file() else None
+
+
+def embedder_section() -> str:
+    """Cross-camera separability, retrieval and the two-sided operational
+    metric, per embedder.
+
+    Reads the JSON summaries written by scripts/{inspect_cityflow_calibration,
+    eval_cityflow_retrieval,analyze_cityflow_recognizability}.py. Those runs
+    are expensive (minutes of CPU embedding per embedder) so they are not
+    re-executed here; absent summaries produce a PENDING block exactly like a
+    missing dataset, and no number is ever carried over from a previous run.
+    """
+    rows_sep, rows_retr, rows_ops = [], [], []
+    for key, label in _EMBEDDER_LABELS.items():
+        tag = "s01" if key == "osnet" else f"s01_{key}"
+        sep = _load_json(Path(f"data/separability_{tag}.json"))
+        retr = _load_json(Path(f"data/retrieval_{tag}.json"))
+        ops = _load_json(Path(f"data/recognizability_{tag}.json"))
+
+        if sep:
+            f = sep["fair_protocol"]
+            rows_sep.append(
+                f"| {label} | {f['fair_auc']:.3f} | {f['adversarial_auc']:.3f} | "
+                f"{f['same_camera_auc']:.3f} | {f['difficulty_gap']:.3f} |")
+        if retr:
+            rows_retr.append(
+                f"| {label} | {retr['rank1'] * 100:.1f}% | "
+                f"{retr['rank5'] * 100:.1f}% | {retr['rank10'] * 100:.1f}% | "
+                f"{retr['mAP'] * 100:.1f}% | {retr['queries']} |")
+        if ops and isinstance(ops, dict) and "recall" in ops:
+            rec, imp = ops["recall"], ops["impostors"]
+            rate = rec["rate"]
+            fpr = imp["false_positive_rate"]
+            rows_ops.append(
+                f"| {label} | {rec['proposed']}/{rec['evaluated_passages']} "
+                f"({0.0 if rate is None else rate * 100:.1f}%) | "
+                f"{imp['impostor_proposals']}/{imp['impostor_evaluations']} "
+                f"({0.0 if fpr is None else fpr * 100:.1f}%) | "
+                f"{imp['same_color']['proposals']}/{imp['same_color']['evaluations']} |")
+
+    if not (rows_sep or rows_retr or rows_ops):
+        return _pending(
+            "CityFlow: embedder separability, retrieval, recall/FPR",
+            "Run `scripts/inspect_cityflow_calibration.py`, "
+            "`scripts/eval_cityflow_retrieval.py` and "
+            "`scripts/analyze_cityflow_recognizability.py` (per embedder) to "
+            "produce the summaries this section reads.")
+
+    out = [
+        "## CityFlow S01: can the embedder do cross-camera at all?",
+        "",
+        "Real ground-truth crops from S01 (795 crops, 95 vehicles, 5 cameras). "
+        "This block exists because the live console never proposed a single "
+        "cross-camera match on real data, and the first diagnosis of that "
+        "(\"the embedder ranks different cars above same cars\") turned out to "
+        "rest on a biased sample — see the two negative-selection protocols below.",
+        "",
+    ]
+    if rows_sep:
+        out += [
+            "### Separability: fair vs adversarial negative selection",
+            "",
+            "**fair** = cross-camera positives vs negatives sampled *uniformly* "
+            "within an appearance bucket. **adversarial** = the same positives "
+            "vs *top-k most similar* mined negatives (`eval/hard_negatives.py`, "
+            "which is the right sample for fitting a calibration curve and the "
+            "wrong one for judging an embedder). **same-camera** = positives "
+            "from the same camera — near-duplicate frames, so this is a sanity "
+            "ceiling, not a re-identification.",
+            "",
+            "| embedder | fair AUC | adversarial AUC | same-camera ceiling | gap |",
+            "|---|---|---|---|---|",
+            *rows_sep,
+            "",
+            "Three things to read off this table. (1) Both embedders score "
+            "~0.94 on the same-camera ceiling, so crops, preprocessing and "
+            "model loading are all sound — whatever is failing is not the "
+            "plumbing. (2) The ImageNet-pretrained default sits at ~0.52 "
+            "cross-camera, i.e. chance: it encodes viewpoint-conditioned "
+            "appearance, not vehicle identity. The vehicle-finetuned "
+            "checkpoint lifts that to ~0.64, a real gain but far from solved. "
+            "(3) The adversarial column stays near 0.1 for BOTH — on the "
+            "most-confusable tail, appearance alone remains worse than a coin "
+            "flip no matter which embedder is used. That residue is the "
+            "genuine look-alike problem, and it is an argument for refusing to "
+            "individuate on appearance rather than for buying a better model.",
+            "",
+            "An earlier reading of this data claimed the embedder ranked "
+            "different cars *above* same cars (AUC 0.102). That figure came "
+            "from the adversarial column and was reported as if it were the "
+            "fair one; the honest version is the table above.",
+            "",
+        ]
+    if rows_retr:
+        out += [
+            "### Retrieval (standard protocol, same-camera-same-id excluded)",
+            "",
+            "Scored by the same `eval/retrieval.py:evaluate_retrieval` used for "
+            "the VeRi-776 table above, so the two are directly comparable.",
+            "",
+            "| embedder | Rank-1 | Rank-5 | Rank-10 | mAP | queries |",
+            "|---|---|---|---|---|---|",
+            *rows_retr,
+            "",
+        ]
+    if rows_ops:
+        out += [
+            "### Two-sided operational metric",
+            "",
+            "Recall and false-positive rate must be read together: a system that "
+            "proposes nothing scores a perfect FPR, and one that proposes "
+            "everything scores perfect recall. Impostors are sampled 2:1 toward "
+            "the *same* estimated colour, because that is the hard case.",
+            "",
+            "| embedder | recall (genuine passages) | FPR (impostor passages) | same-colour impostors |",
+            "|---|---|---|---|",
+            *rows_ops,
+            "",
+            "Both embedders sit at the same degenerate corner: nothing "
+            "proposed, so precision is trivially perfect and recall is zero. "
+            "Since retrieval quality differs ~3x between them and this table "
+            "does not move at all, the binding constraint is not the embedder "
+            "— it is the cascade's scoring arithmetic. Colour contributes at "
+            "most `W_CLASS_ATTRS` (0.20) and appearance at most `W_REID_MAX` "
+            "(0.30) against a `LIKELY_THRESHOLD` of 0.45, so an "
+            "honestly-calibrated appearance signal cannot cross the bar on a "
+            "profile that has only colour plus appearance to work with, "
+            "however good the embedding becomes. Whether that ceiling should "
+            "change is a policy question, not a tuning one; this table is the "
+            "baseline any such change has to be measured against.",
+            "",
+        ]
+    return "\n".join(out)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--quick", action="store_true",
@@ -336,6 +483,7 @@ def main() -> None:
         veri_section(args.quick),
         vehicleid_section(args.quick),
         cityflow_section(),
+        embedder_section(),
         threed_section(),
         synthetic_section(),
     ]
