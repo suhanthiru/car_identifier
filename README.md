@@ -4,18 +4,54 @@ A real-time, distributed vehicle-tracking and re-identification research demo wh
 
 > **Data envelope.** Real data means established public research datasets obtained under their research-use terms, and nothing else — no scraped feeds, no covert footage, no non-consented camera data. Until those datasets are downloaded (they require manual request forms; see [DATASETS.md](DATASETS.md)), every real-data section of RESULTS.md reads **PENDING**: the harness never substitutes synthetic numbers for missing real ones. The always-runnable demo uses a clearly-labeled synthetic world.
 
-## Reproduce the results
+## Run it
 
 ```
 python -m venv .venv
-.venv\Scripts\activate
+.venv\Scripts\activate               # Linux/macOS: source .venv/bin/activate
 pip install -r requirements.txt
-pip install -e "D:\comp_vison_projs\Car_Gen_and_Modeling_proj"   # cargen, for the 3D bridge
-pytest -m "not slow"                 # ~150 tests, pure logic + fixtures
-# obtain datasets per DATASETS.md, then:
-python -m eval.run                   # regenerates RESULTS.md + figures
-python demo.py                       # synthetic live-console demo (no datasets needed)
+python start.py
 ```
+
+That's the whole thing. `start.py` detects what's on the machine and runs the
+best demo it can: real CityFlow footage if you have the dataset, otherwise the
+synthetic world, which needs no downloads at all. It prints what it chose and
+why, opens the console, and tells you if it's on CPU or GPU.
+
+**No dataset, no GPU, and no cargen install required to see the system work.**
+
+| | download | needed for |
+|---|---|---|
+| nothing | — | synthetic console + reasoning inspector + full test suite |
+| CityFlow (AIC22 Track 1) | ~34 GB total, **0.73 GB** for scenario S01 alone | real-footage console, the CityFlow numbers in RESULTS.md |
+| VeRi-776 | ~1 GB | the retrieval/calibration numbers in RESULTS.md |
+| cargen | separate repo, editable install | the 3D reconstruction panel |
+| FastReID checkpoint | 198 MB | the stronger appearance backbone (`--embedder fastreid`) |
+
+Both datasets require a research-use request form — see [DATASETS.md](DATASETS.md).
+Until they're present, every real-data section of RESULTS.md reads **PENDING**;
+the harness never substitutes synthetic numbers for missing real ones.
+
+### Everything else
+
+```
+pytest -m "not slow"                 # 287 tests, pure logic + fixtures, no datasets
+python -m eval.run                   # regenerates RESULTS.md + figures (needs datasets)
+python start.py --mode synthetic     # force the no-dataset demo
+python start.py --no-3d              # skip the 3D panel
+pip install -e path/to/cargen        # optional: enables the 3D bridge
+```
+
+### On hardware
+
+Runs on a laptop: the live console is a 0.6M-parameter appearance model plus
+video decode, ~400–650 MB of RAM. Nothing requires a GPU.
+
+If a CUDA-capable GPU **and** a CUDA build of torch are present, the embedders
+use it automatically — no flag. The stock `pip install torch` is often CPU-only,
+so `start.py` prints which device it actually got. The GPU matters most for the
+optional FastReID backbone (~40× heavier than the default) and for cargen's real
+3D backends, which need CUDA and are not installed by default.
 
 ## What the evaluation measures
 

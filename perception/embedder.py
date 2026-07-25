@@ -45,6 +45,7 @@ class ReidEmbedder:
         self._weights_path = weights_path
         self._model = None
         self._torch = None
+        self._device = None       # set at load: cuda when available, else cpu
         self._load_lock = threading.Lock()
 
     def _load(self) -> None:
@@ -69,6 +70,12 @@ class ReidEmbedder:
             if self._weights_path:
                 torchreid.reid.utils.load_pretrained_weights(model, self._weights_path)
             model.eval()
+            # Use the GPU when there is one. A CPU-only torch build reports
+            # no CUDA and this silently stays on CPU, so the same code runs
+            # on a laptop and a workstation without a flag.
+            self._device = torch.device(
+                "cuda" if torch.cuda.is_available() else "cpu")
+            model.to(self._device)
             self._torch = torch
             self._model = model
 
@@ -94,7 +101,7 @@ class ReidEmbedder:
                     # image to float64 and double the memory for nothing.
                     rgb = (rgb - _IMAGENET_MEAN) / _IMAGENET_STD
                     batch.append(rgb.transpose(2, 0, 1))
-                x = torch.from_numpy(np.stack(batch))
+                x = torch.from_numpy(np.stack(batch)).to(self._device)
                 chunks.append(self._model(x).cpu().numpy())
         feats = np.concatenate(chunks, axis=0).astype(np.float32)
         norms = np.linalg.norm(feats, axis=1, keepdims=True)

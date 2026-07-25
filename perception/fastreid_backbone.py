@@ -246,6 +246,7 @@ class FastReidEmbedder:
     def __init__(self, checkpoint_path: Path = DEFAULT_CHECKPOINT):
         self._checkpoint_path = checkpoint_path
         self._model: FastReidVeriModel | None = None
+        self._device = None       # set at load: cuda when available, else cpu
         self._load_lock = threading.Lock()
 
     def _load(self) -> None:
@@ -254,7 +255,14 @@ class FastReidEmbedder:
         with self._load_lock:
             if self._model is not None:
                 return
-            self._model = load_fastreid_veri_model(self._checkpoint_path)
+            model = load_fastreid_veri_model(self._checkpoint_path)
+            # This backbone is ~40x heavier than the OSNet default, so the
+            # CPU/GPU gap matters far more here. Same code either way: a
+            # CPU-only torch build reports no CUDA and stays on CPU.
+            self._device = torch.device(
+                "cuda" if torch.cuda.is_available() else "cpu")
+            model.to(self._device)
+            self._model = model
 
     def embed(self, crop_bgr: np.ndarray) -> np.ndarray:
         return self.embed_batch([crop_bgr])[0]
@@ -272,7 +280,8 @@ class FastReidEmbedder:
         chunks = []
         with torch.no_grad():
             for i in range(0, len(prepped), BATCH_CHUNK):
-                x = torch.from_numpy(np.stack(prepped[i:i + BATCH_CHUNK]))
+                x = torch.from_numpy(
+                    np.stack(prepped[i:i + BATCH_CHUNK])).to(self._device)
                 chunks.append(self._model(x).cpu().numpy())
         feats = np.concatenate(chunks, axis=0).astype(np.float32)
         norms = np.linalg.norm(feats, axis=1, keepdims=True)
