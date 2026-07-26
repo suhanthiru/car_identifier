@@ -15,12 +15,18 @@ what it refuses to claim, not what it claims.
 ## Start it
 
 ```bash
-.venv\Scripts\python.exe scripts/run_cityflow_console.py --scenario S01 --time-scale 4
+python start.py
 ```
 
-A browser opens at `http://127.0.0.1:8010`. Wait ~30s for the vehicle thumbnails to
-build. `--time-scale 4` means four seconds of footage per real second; lower it to
-`2` if things fly past too fast.
+A browser opens at `http://127.0.0.1:8010`. The first launch spends ~15s building
+vehicle thumbnails; after that it's cached and starts immediately.
+
+Use the **⏸ PAUSE** button in the top-right whenever you want to stop and look at
+something. It freezes the replay clock but leaves the review queue fully workable —
+so you can read a card, compare clips, and accept or reject while nothing new
+arrives. It turns amber while paused. Resume picks up exactly where it left off.
+
+Add `--time-scale 2` if things still move too fast.
 
 ## What you're looking at
 
