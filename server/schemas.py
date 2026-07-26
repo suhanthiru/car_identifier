@@ -112,3 +112,10 @@ class PipelineConfigRequest(BaseModel):
     Only meaningful fields need be sent; omitted ones are left unchanged."""
 
     plate_ocr: bool | None = None
+
+
+class FeedControlRequest(BaseModel):
+    """Freeze/resume the replay clock (server.feed.FeedClock). Omit the
+    field to read the current state without changing it."""
+
+    paused: bool | None = None

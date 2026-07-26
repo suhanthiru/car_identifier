@@ -49,6 +49,14 @@ body {
 .tb-sep { width: 1px; height: 14px; background: var(--line); }
 .tb-sub { font-size: 11px; color: var(--dim); letter-spacing: .04em; }
 .tb-stat { display: flex; align-items: center; gap: 6px; }
+/* Replay pause. Amber while paused so a frozen clock is never mistaken for
+   a quiet one -- the console looks identical either way. */
+.tb-btn { font-family: inherit; font-size: 11px; letter-spacing: .06em; color: var(--dim);
+  background: transparent; border: 1px solid var(--line); border-radius: 3px;
+  padding: 3px 9px; cursor: pointer; transition: color .15s, border-color .15s; }
+.tb-btn:hover:not(:disabled) { color: var(--text); border-color: var(--dim); }
+.tb-btn:disabled { opacity: .5; cursor: default; }
+.tb-btn.paused { color: var(--tentative); border-color: var(--tentative); }
 .tb-dot { width: 6px; height: 6px; border-radius: 50%; }
 .tb-dot-green { background: var(--confirmed); }
 .tb-dot-blue { background: var(--accent); }

@@ -37,8 +37,8 @@ from perception.types import Observation, PlateRead
 from reasoning.profile import profile_from_flag
 from server import db as dbm
 from server.schemas import (
-    FlagTargetRequest, InspectRequest, PipelineConfigRequest, ProfileEditRequest,
-    ReviewResolution, SightingReport,
+    FeedControlRequest, FlagTargetRequest, InspectRequest, PipelineConfigRequest,
+    ProfileEditRequest, ReviewResolution, SightingReport,
 )
 from server.ws import ConnectionManager
 from sim.road_graph import RoadGraph, default_world
@@ -181,6 +181,11 @@ def create_app(
     # POST /api/pipeline_config so a single demo session can show both
     # states, not just a startup flag.
     state.enable_plate_ocr = enable_plate_ocr
+    # Replay pause. The feeds read this live via server.feed.FeedClock, which
+    # stops counting wall time while it is set -- so every camera task freezes
+    # on one shared timeline and the cross-camera gaps the transit check
+    # scores against survive the pause unchanged.
+    state.feed_paused = False
     # Shared lazy embedder for photo-seeded flags (see _flag_embedder below);
     # tests may inject a stub here to avoid the model load.
     state.flag_embedder = None
@@ -803,6 +808,24 @@ def create_app(
         if req.plate_ocr is not None:
             state.enable_plate_ocr = req.plate_ocr
         return {"plate_ocr": state.enable_plate_ocr}
+
+    @app.get("/api/feed_control")
+    def feed_control_get():
+        return {"paused": state.feed_paused}
+
+    @app.post("/api/feed_control")
+    def feed_control_set(req: FeedControlRequest):
+        """Freeze or resume the replay.
+
+        Only the CLOCK stops. Sightings already reported keep their state,
+        the review queue stays workable while paused, and nothing is
+        rewound -- the reasoning layer mutates belief and profiles as it
+        goes, so running it backwards would show a past frame beside
+        present-tense conclusions. Pause is honest; rewind would not be.
+        """
+        if req.paused is not None:
+            state.feed_paused = req.paused
+        return {"paused": state.feed_paused}
 
     @app.get("/api/cityflow/scenarios")
     def cityflow_scenarios():

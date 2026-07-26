@@ -385,3 +385,14 @@ def test_websocket_stream(client):
         types = [ws.receive_json()["type"] for _ in range(3)]
         assert "contact" in types
         assert "association" in types
+
+
+def test_feed_control_defaults_running_and_round_trips(client):
+    """Pause is server state, not a client toggle: a reload or a second tab
+    must see the real clock, not its own guess."""
+    assert client.get("/api/feed_control").json() == {"paused": False}
+    assert client.post("/api/feed_control", json={"paused": True}).json() == {"paused": True}
+    assert client.get("/api/feed_control").json() == {"paused": True}
+    # Omitting the field reads without mutating.
+    assert client.post("/api/feed_control", json={}).json() == {"paused": True}
+    assert client.post("/api/feed_control", json={"paused": False}).json() == {"paused": False}

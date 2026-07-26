@@ -32,6 +32,61 @@ class FeedConfig:
     send_crops: bool = True
 
 
+class FeedClock:
+    """Replay clock that stops while the operator has the feed paused.
+
+    Every camera runs as its own task off one shared timeline, so pausing
+    cannot be a per-task sleep: the cameras would drift apart and the
+    cross-camera transit times -- which the reasoning layer actually scores
+    against -- would be wrong on resume. Instead all tasks read elapsed time
+    from here, and paused wall-time is simply never counted. Freezing and
+    resuming is then invisible to the replay: a car that took 8 seconds to
+    cross still took 8 seconds, however long you stared at it.
+
+    `state` is any object with a `feed_paused` attribute (the server's
+    app.state), read live so the toggle takes effect within a tick.
+    """
+
+    TICK_S = 0.2               # cap on how long a sleeping task waits to notice
+
+    def __init__(self, state: object | None = None, start: float | None = None):
+        self._state = state
+        self._start = start if start is not None else asyncio.get_running_loop().time()
+        self._paused_total = 0.0
+        self._paused_since: float | None = None
+
+    @property
+    def paused(self) -> bool:
+        return bool(getattr(self._state, "feed_paused", False))
+
+    def elapsed(self) -> float:
+        """Wall seconds since start, excluding time spent paused."""
+        now = asyncio.get_running_loop().time()
+        frozen = self._paused_total
+        if self._paused_since is not None:
+            frozen += now - self._paused_since
+        return now - self._start - frozen
+
+    def _sync(self) -> None:
+        if self.paused and self._paused_since is None:
+            self._paused_since = asyncio.get_running_loop().time()
+        elif not self.paused and self._paused_since is not None:
+            self._paused_total += asyncio.get_running_loop().time() - self._paused_since
+            self._paused_since = None
+
+    async def wait_until(self, offset_s: float) -> None:
+        """Sleep until `offset_s` of unpaused time has elapsed."""
+        while True:
+            self._sync()
+            if not self.paused:
+                remaining = offset_s - self.elapsed()
+                if remaining <= 0:
+                    return
+                await asyncio.sleep(min(remaining, self.TICK_S))
+            else:
+                await asyncio.sleep(self.TICK_S)
+
+
 def observation_payload(obs: Observation, send_crop: bool = True) -> dict:
     """Serialize an Observation into the report_sighting body."""
     crop_b64 = ""
@@ -74,20 +129,21 @@ async def _edge_node(
     client: httpx.AsyncClient,
     cfg: FeedConfig,
     t0: float,
-    wall_start: float,
+    clock: FeedClock,
 ) -> int:
     """One simulated edge node: replay this camera's events in scaled time."""
     sent = 0
-    loop = asyncio.get_running_loop()
     for event in events:
-        due = wall_start + (event.timestamp_s - t0) / cfg.time_scale
-        delay = due - loop.time()
-        if delay > 0:
-            await asyncio.sleep(delay)
+        due = (event.timestamp_s - t0) / cfg.time_scale
+        await clock.wait_until(due)
         # Perception is synchronous CPU work; keep the loop responsive.
         obs = await asyncio.to_thread(perceptor.process, event)
         if obs is None:
             continue  # simulated missed detection
+        # Perception took real time; if pause landed during it, hold the
+        # report rather than letting sightings trickle into a frozen
+        # console. Returns immediately when running.
+        await clock.wait_until(due)
         resp = await client.post(
             f"{cfg.base_url}/api/sightings",
             json=observation_payload(obs, cfg.send_crops),
@@ -101,6 +157,7 @@ async def run_feed(
     world: SimWorld,
     cfg: FeedConfig | None = None,
     perception: PerceptionConfig | None = None,
+    pipeline_state: object | None = None,
 ) -> dict[str, int]:
     """Run every simulated edge node to completion; returns sent-counts."""
     cfg = cfg or FeedConfig()
@@ -111,9 +168,9 @@ async def run_feed(
     t0 = min((evs[0].timestamp_s for evs in by_camera.values() if evs), default=0.0)
 
     async with httpx.AsyncClient() as client:
-        wall_start = asyncio.get_running_loop().time()
+        clock = FeedClock(pipeline_state)
         results = await asyncio.gather(*(
-            _edge_node(cam, events, perceptor, client, cfg, t0, wall_start)
+            _edge_node(cam, events, perceptor, client, cfg, t0, clock)
             for cam, events in by_camera.items() if events))
     cameras = [cam for cam, events in by_camera.items() if events]
     return dict(zip(cameras, results))

@@ -22,7 +22,7 @@ import httpx
 from datasets.cityflow import CityFlowScenario
 from datasets.cityflow_video import VideoFrameSource, bbox_for, vehicle_frame_spans
 from perception.real_observe import RealPerceptor
-from server.feed import observation_payload
+from server.feed import FeedClock, observation_payload
 
 
 @dataclass(frozen=True)
@@ -173,19 +173,20 @@ def build_vehicle_index(
 
 async def _edge_node(
     camera_id: str, passages: list[_Passage], perceptor: RealPerceptor,
-    client: httpx.AsyncClient, cfg: CityFlowFeedConfig, t0: float, wall_start: float,
+    client: httpx.AsyncClient, cfg: CityFlowFeedConfig, t0: float, clock: FeedClock,
 ) -> int:
     sent = 0
-    loop = asyncio.get_running_loop()
     for p in passages:
-        due = wall_start + (p.timestamp_s - t0) / cfg.time_scale
-        delay = due - loop.time()
-        if delay > 0:
-            await asyncio.sleep(delay)
+        due = (p.timestamp_s - t0) / cfg.time_scale
+        await clock.wait_until(due)
         obs = await asyncio.to_thread(
             perceptor.process, camera_id, p.vehicle_id, p.frame, p.timestamp_s)
         if obs is None:
             continue  # no bbox at that frame, or an unreadable crop
+        # Perception took real time; if the operator hit pause during it,
+        # hold the report rather than letting a handful of sightings land
+        # after the console visibly froze. Returns immediately when running.
+        await clock.wait_until(due)
         resp = await client.post(
             f"{cfg.base_url}/api/sightings",
             json=observation_payload(obs, cfg.send_crops), timeout=30.0)
@@ -219,9 +220,9 @@ async def run_cityflow_feed(
 
     try:
         async with httpx.AsyncClient() as client:
-            wall_start = asyncio.get_running_loop().time()
+            clock = FeedClock(pipeline_state)
             results = await asyncio.gather(*(
-                _edge_node(cam, passages, perceptor, client, cfg, t0, wall_start)
+                _edge_node(cam, passages, perceptor, client, cfg, t0, clock)
                 for cam, passages in by_camera.items() if passages))
     finally:
         perceptor.close()

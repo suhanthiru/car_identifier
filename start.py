@@ -130,8 +130,10 @@ def run_synthetic(port: int, time_scale: float, open_browser: bool) -> None:
         webbrowser.open(base)
     print(f"\n  replaying the synthetic world at {time_scale}x - watch the console\n")
 
-    counts = asyncio.run(run_feed(build_default_world(),
-                                  FeedConfig(base_url=base, time_scale=time_scale)))
+    counts = asyncio.run(run_feed(
+        build_default_world(),
+        FeedConfig(base_url=base, time_scale=time_scale),
+        pipeline_state=app.state))
     _idle(server, sum(counts.values()), len(counts))
 
 

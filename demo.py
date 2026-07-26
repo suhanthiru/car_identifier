@@ -43,7 +43,7 @@ def reset_demo_data() -> Path:
     return db_path
 
 
-def start_server(port: int, db_path: Path) -> uvicorn.Server:
+def start_server(port: int, db_path: Path):
     from server.api import create_app
 
     app = create_app(db_url=f"sqlite:///{db_path.as_posix()}")
@@ -52,7 +52,7 @@ def start_server(port: int, db_path: Path) -> uvicorn.Server:
     server = uvicorn.Server(config)
     thread = threading.Thread(target=server.run, daemon=True)
     thread.start()
-    return server
+    return server, app.state
 
 
 def wait_for_server(base: str, timeout_s: float = 30.0) -> None:
@@ -100,7 +100,7 @@ def main() -> None:
     db_path = reset_demo_data() if not args.keep_db else DB_PATH
 
     base = f"http://127.0.0.1:{args.port}"
-    server = start_server(args.port, db_path)
+    server, app_state = start_server(args.port, db_path)
     wait_for_server(base)
     print(f"server up at {base}")
     flag_demo_targets(base)
@@ -109,8 +109,9 @@ def main() -> None:
     print(f"replaying the synthetic world at {args.time_scale}x...")
 
     world = build_default_world()
-    counts = asyncio.run(run_feed(world, FeedConfig(
-        base_url=base, time_scale=args.time_scale)))
+    counts = asyncio.run(run_feed(
+        world, FeedConfig(base_url=base, time_scale=args.time_scale),
+        pipeline_state=app_state))
     print(f"feed complete: {sum(counts.values())} sightings across "
           f"{len(counts)} cameras")
     print("console stays live for review-queue work — ctrl+c to quit")

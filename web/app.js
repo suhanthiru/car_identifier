@@ -76,10 +76,42 @@ async function initMap() {
   document.getElementById("tb-cameras").textContent = `${cameras.length}/${cameras.length} CAMERAS`;
   document.getElementById("tb-subtitle").textContent =
     worldSource.source === "real" ? "REAL-DATA CONSOLE" : "SYNTHETIC RESEARCH CONSOLE";
+  // Pause works in both worlds -- both feeds share server.feed.FeedClock.
+  initFeedControl();
   if (worldSource.source === "real") {
     initCityflowVehicleBrowser();
     initPipelineStrip();
   }
+}
+
+async function initFeedControl() {
+  const btn = document.getElementById("feed-toggle");
+  if (!btn) return;
+  // Server state, not local: the replay clock lives in the feed process, and
+  // a reload or a second tab must show the truth rather than its own guess.
+  const paint = (paused) => {
+    btn.textContent = paused ? "▶ RESUME" : "⏸ PAUSE";
+    btn.classList.toggle("paused", !!paused);
+  };
+  const sync = async () => {
+    const s = await api("/api/feed_control").catch(() => null);
+    if (s) paint(s.paused);
+  };
+  btn.onclick = async () => {
+    const now = btn.textContent.includes("PAUSE");
+    btn.disabled = true;
+    try {
+      const s = await api("/api/feed_control", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ paused: now }),
+      });
+      paint(s.paused);
+    } finally {
+      btn.disabled = false;
+    }
+  };
+  await sync();
+  setInterval(sync, 5000);
 }
 
 async function initPipelineStrip() {
