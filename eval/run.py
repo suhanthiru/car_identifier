@@ -21,8 +21,42 @@ from pathlib import Path
 import numpy as np
 
 RESULTS_PATH = Path("RESULTS.md")
-EMBED_ARCH = "osnet_x0_25 (torchreid, ImageNet-pretrained; VeRi-776-trained "\
-    "weights are a manual download — see README)"
+
+# The VeRi block used to be hard-wired to OSNet, which meant the headline
+# ablation could only ever be measured against an ImageNet-pretrained backbone
+# that scores near chance cross-camera (fair AUC 0.52). That understates the
+# question the ablation asks: does the symbolic layer still help when the
+# appearance model is already good? Selectable so both answers are reachable.
+_EMBEDDERS = {
+    "osnet": ("osnet_x0_25 (torchreid, ImageNet-pretrained; VeRi-776-trained "
+              "weights are a manual download — see README)", "osnet_x0_25"),
+    "fastreid": ("FastReID SBS(R50-ibn), VeRi-776-finetuned "
+                 "(models/veri_sbs_R50-ibn.pth)", "fastreid_sbs_r50ibn"),
+}
+EMBED_KEY = "osnet"
+EMBED_ARCH = _EMBEDDERS[EMBED_KEY][0]
+
+
+def _select_embedder(key: str) -> None:
+    """Point the VeRi block at one of the two backbones.
+
+    Also switches the embedding cache tag, so switching backbones can never
+    silently reuse the other one's cached vectors — the failure that would
+    look like "FastReID scores exactly what OSNet scored".
+    """
+    global EMBED_KEY, EMBED_ARCH
+    EMBED_KEY = key
+    EMBED_ARCH = _EMBEDDERS[key][0]
+
+
+def _embedder_for_run():
+    """(embedder instance or None, cache arch tag)."""
+    _, arch_tag = _EMBEDDERS[EMBED_KEY]
+    if EMBED_KEY == "fastreid":
+        from perception.fastreid_backbone import FastReidEmbedder
+
+        return FastReidEmbedder(), arch_tag
+    return None, arch_tag
 
 
 def _pending(name: str, why: str, headline: str = "dataset not present",
@@ -69,13 +103,91 @@ def _threshold_note(report) -> str:
             f"at any operating point.")
 
 
-def veri_section(quick: bool) -> str:
+def available_embedders(requested: str) -> list[str]:
+    """Which backbones this machine can actually run, `requested` first.
+
+    Reporting one embedder at a time was a mistake: `--embedder fastreid`
+    overwrote the OSNet ablation, and the comparison between a near-chance
+    backbone and a vehicle-finetuned one IS the interesting result — whether
+    the symbolic layer still earns its keep once appearance matching is good.
+    Both are emitted whenever both are installed.
+    """
+    from pathlib import Path as _P
+
+    keys = [requested] + [k for k in sorted(_EMBEDDERS) if k != requested]
+    out = []
+    for key in keys:
+        if key == "fastreid" and not _P("models/veri_sbs_R50-ibn.pth").is_file():
+            continue
+        out.append(key)
+    return out
+
+
+def _ablation_sweep_block(query, q_emb, gallery, g_emb, chosen, pct) -> list[str]:
+    """The ablation across operating points, not just the chosen one.
+
+    A single threshold can hide the whole effect. On FastReID the chosen
+    threshold fires 36 alerts out of 1678 (2.1% recall) and both policies score
+    100% precision with zero false positives — reported alone that reads as
+    "the cascade adds nothing", when what it actually means is "at this
+    operating point there was nothing left to add".
+
+    The cause is a distribution mismatch worth naming: the threshold is fitted
+    on `mine_pairs`' adversarially-selected top-k look-alikes and then applied
+    to natural query->gallery top-1 matches. Adversarial pairs are far harder,
+    so the threshold that survives them is far too conservative for the real
+    task. Sweeping shows where the cascade actually earns its keep.
+    """
+    from eval.ablation import run_ablation
+
+    rows = []
+    for t in (0.50, 0.60, 0.70, 0.80, 0.90):
+        metrics, _ = run_ablation(query, q_emb, gallery, g_emb, threshold=t)
+        raw = next(m for m in metrics if m.name == "raw")
+        cas = next(m for m in metrics if m.name == "cascade")
+        cut = (1 - cas.false_positives / raw.false_positives
+               if raw.false_positives else float("nan"))
+        mark = " *(chosen)*" if abs(t - chosen) < 0.026 else ""
+        rows.append(
+            f"| {t:.2f}{mark} | {pct(raw.precision)} | {pct(raw.recall)} | "
+            f"{raw.false_positives} | {pct(cas.precision)} | {pct(cas.recall)} | "
+            f"{cas.false_positives} | {cas.reviews} | {pct(cut)} |")
+    return [
+        "",
+        "#### The same ablation across operating points",
+        "",
+        "One threshold can hide the entire effect, so here is the sweep. The "
+        "chosen threshold comes from a calibration fitted on *adversarially "
+        "mined* look-alike pairs and is then applied to *natural* top-1 "
+        "matches; adversarial pairs are much harder, so that threshold is far "
+        "more conservative than the task needs, and at the extreme it alerts "
+        "so rarely that neither policy can be wrong. Read the high-recall rows "
+        "for what the symbolic layer actually buys.",
+        "",
+        "| threshold | raw P | raw R | raw FP | cascade P | cascade R | "
+        "cascade FP | reviews | FP eliminated |",
+        "|---|---|---|---|---|---|---|---|---|",
+        *rows,
+        "",
+    ]
+
+
+def veri_section(quick: bool, embedders: list[str] | None = None) -> str:
     from datasets.veri776 import Veri776
 
     if not Veri776.exists():
         return _pending(
             "VeRi-776: retrieval, calibration, ablation",
             "VeRi-776 requires the authors' research-use request form.")
+    blocks = []
+    for i, key in enumerate(embedders or [EMBED_KEY]):
+        _select_embedder(key)
+        blocks.append(_veri_block(quick, primary=(i == 0)))
+    return "\n".join(blocks)
+
+
+def _veri_block(quick: bool, primary: bool = True) -> str:
+    from datasets.veri776 import Veri776
     from calibration.isotonic import build_report, save
     from eval.ablation import run_ablation
     from eval.embed_dataset import embed_images
@@ -91,24 +203,36 @@ def veri_section(quick: bool) -> str:
     query, gallery = list(ds.query), list(ds.gallery)
     if quick:
         query, gallery = query[:200], gallery[:1500]
-    print(f"VeRi-776: {len(query)} query / {len(gallery)} gallery images")
-    q_emb = embed_images([i.path for i in query], f"veri-query-{len(query)}")
-    g_emb = embed_images([i.path for i in gallery], f"veri-gallery-{len(gallery)}")
+    print(f"VeRi-776: {len(query)} query / {len(gallery)} gallery images "
+          f"[{EMBED_KEY}]")
+    embedder, arch_tag = _embedder_for_run()
+    q_emb = embed_images([i.path for i in query], f"veri-query-{len(query)}",
+                         embedder=embedder, arch=arch_tag)
+    g_emb = embed_images([i.path for i in gallery], f"veri-gallery-{len(gallery)}",
+                         embedder=embedder, arch=arch_tag)
 
+    # Per-embedder filenames: two blocks in one document must not overwrite
+    # each other's figures, and a stale veri_cmc.png silently showing the other
+    # backbone's curve is exactly the kind of quiet wrongness this repo cares
+    # about. The primary run also writes the unsuffixed artifact the cascade
+    # loads at runtime.
+    sfx = f"_{EMBED_KEY}"
     res = evaluate_retrieval(
         q_emb, [i.vehicle_id for i in query], [i.camera_id for i in query],
         g_emb, [i.vehicle_id for i in gallery], [i.camera_id for i in gallery])
-    plot_cmc(res.cmc, f"VeRi-776 CMC ({EMBED_ARCH.split()[0]})", "veri_cmc.png")
+    plot_cmc(res.cmc, f"VeRi-776 CMC ({EMBED_ARCH.split()[0]})", f"veri_cmc{sfx}.png")
 
     pairs = mine_pairs(gallery, g_emb)
     report = build_report(pairs, note=(
         "Calibrated on VeRi-776 gallery pairs (real vehicle crops): measures "
         "this embedder's confusability on that dataset — it does not "
         "transfer to other deployments (see eval/generalization notes)."))
-    save(report, "calibration/artifacts/veri776.json")
+    save(report, f"calibration/artifacts/veri776{sfx}.json")
+    if primary:
+        save(report, "calibration/artifacts/veri776.json")
     rel = compute_reliability(pairs, report.model)
-    plot_reliability(rel.bins, rel.ece, "veri_reliability.png")
-    plot_pr_sweep(report.sweep, report.chosen_threshold, "veri_sweep.png")
+    plot_reliability(rel.bins, rel.ece, f"veri_reliability{sfx}.png")
+    plot_pr_sweep(report.sweep, report.chosen_threshold, f"veri_sweep{sfx}.png")
 
     hard = hardest_pairs(pairs, top=6)
     gallery_rows = []
@@ -119,7 +243,7 @@ def veri_section(quick: bool) -> str:
             gallery_rows.append((a, b, f"DIFFERENT vehicles, sim "
                                        f"{p.similarity:.3f} ({p.bucket})"))
     if gallery_rows:
-        plot_pair_gallery(gallery_rows, "veri_confusables.png",
+        plot_pair_gallery(gallery_rows, f"veri_confusables{sfx}.png",
                           "Hardest real look-alike pairs (all different vehicles)")
 
     metrics, cases = run_ablation(
@@ -130,7 +254,8 @@ def veri_section(quick: bool) -> str:
     subsample_note = " *(subsampled `--quick` run — not headline numbers)*" if quick else ""
     n_hard = sum(p.hard_negative for p in pairs)
     lines = [
-        f"## VeRi-776: retrieval, calibration, ablation{subsample_note}",
+        f"## VeRi-776 [{EMBED_KEY}]: retrieval, calibration, ablation"
+        f"{subsample_note}",
         "",
         f"Embeddings: {EMBED_ARCH}. {len(query)} query / {len(gallery)} gallery "
         f"images, standard same-camera exclusion protocol.",
@@ -142,7 +267,7 @@ def veri_section(quick: bool) -> str:
         f"| {res.rank1:.1%} | {res.rank(5):.1%} | {res.rank(10):.1%} "
         f"| {res.mean_ap:.1%} | {res.n_queries_scored} |",
         "",
-        "![CMC](eval/figures/veri_cmc.png)",
+        f"![CMC](eval/figures/veri_cmc{sfx}.png)",
         "",
         "### Calibration on mined real hard negatives",
         "",
@@ -152,9 +277,9 @@ def veri_section(quick: bool) -> str:
         f"{_threshold_note(report)} Hard-negative FPR at that threshold: "
         f"{report.hard_negative_fpr_at_threshold:.1%}.",
         "",
-        "![reliability](eval/figures/veri_reliability.png)",
-        "![sweep](eval/figures/veri_sweep.png)",
-        "![confusables](eval/figures/veri_confusables.png)",
+        f"![reliability](eval/figures/veri_reliability{sfx}.png)",
+        f"![sweep](eval/figures/veri_sweep{sfx}.png)",
+        f"![confusables](eval/figures/veri_confusables{sfx}.png)",
         "",
         "### THE ABLATION: raw ReID alerting vs cascade + vetoes",
         "",
@@ -189,10 +314,19 @@ def veri_section(quick: bool) -> str:
             "cascade's contribution.")
     else:
         dp = cas.precision - raw.precision
+        note = ""
+        if raw.alerts and not raw.false_positives:
+            # A zero-delta headline is misleading when the baseline had nothing
+            # to get wrong; point at the sweep rather than let it stand alone.
+            note = (" At this threshold the raw policy made no false positives "
+                    "at all, so there was nothing for the cascade to remove — "
+                    "see the sweep below for operating points where there is.")
         lines.append(
             f"**Delta: {_pct(dp) if dp == dp else 'n/a'} precision; {fp_cut:.0%} "
             f"of raw false positives eliminated by the attribute veto + "
-            f"look-alike ambiguity refusal.**")
+            f"look-alike ambiguity refusal.**{note}")
+    lines += _ablation_sweep_block(query, q_emb, gallery, g_emb,
+                                   report.chosen_threshold, _pct)
     lines += [
         "",
         "### Failure cases (honest, not curated away)",
@@ -658,18 +792,23 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--quick", action="store_true",
                         help="subsample for a fast smoke run (not headline numbers)")
+    parser.add_argument("--embedder", choices=sorted(_EMBEDDERS), default="osnet",
+                        help="backbone for the VeRi block (default: osnet). "
+                             "fastreid needs models/veri_sbs_R50-ibn.pth")
     args = parser.parse_args()
+    _select_embedder(args.embedder)
 
     stamp = _dt.datetime.now().strftime("%Y-%m-%d %H:%M")
     parts = [
         "# RESULTS",
         "",
-        f"*Regenerated by `python -m eval.run` on {stamp}. Every section is "
-        f"computed from data actually present on disk; missing datasets "
-        f"produce PENDING sections, never substituted numbers. Nothing here "
-        f"claims production accuracy — see the Limits section of the README.*",
+        f"*Regenerated by `python -m eval.run --embedder {args.embedder}` on "
+        f"{stamp}. Every section is computed from data actually present on "
+        f"disk; missing datasets produce PENDING sections, never substituted "
+        f"numbers. Nothing here claims production accuracy — see the Limits "
+        f"section of the README.*",
         "",
-        veri_section(args.quick),
+        veri_section(args.quick, available_embedders(args.embedder)),
         vehicleid_section(args.quick),
         cityflow_section(),
         embedder_section(),
