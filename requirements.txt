@@ -9,7 +9,12 @@ numpy==1.26.4
 scikit-learn==1.5.2
 
 # Perception (off-the-shelf glue — heavy; installed lazily, see README)
-# torch CPU build is pulled in by ultralytics
+# NOTE ON torch: plain `pip install -r requirements.txt` gets whatever build
+# ultralytics resolves, which on Windows/Linux is CPU-only. `python start.py`
+# (or `python setup_env.py`) installs the CUDA wheel from PyTorch's own index
+# FIRST when it sees an NVIDIA GPU, so this line finds torch already satisfied.
+# pip cannot express a per-package --index-url in a requirements file, which
+# is exactly why that step lives in setup_env.py instead of here.
 ultralytics==8.3.58
 opencv-python==4.10.0.84
 fast-plate-ocr==0.3.0
@@ -21,9 +26,11 @@ tensorboard==2.21.0    # torchreid import-time dependency (unused here)
 # Evaluation
 matplotlib==3.11.0
 
-# 3D vehicle model bridge (local project, installed editable):
-#   pip install -e D:\comp_vison_projs\Car_Gen_and_Modeling_proj
-# cargen provides single-photo 3DGS reconstruction + gated fusion; see car3d/.
+# 3D vehicle model bridge (local project, installed editable — not on PyPI, so
+# it cannot be pinned here). setup_env.py finds the checkout automatically by
+# searching alongside this repo; override with EYES_CARGEN_PATH if it lives
+# somewhere unusual. cargen provides single-photo 3DGS reconstruction + gated
+# fusion; see car3d/.
 
 # Testing
 pytest==8.3.4

@@ -28,6 +28,7 @@ from pathlib import Path
 
 import numpy as np
 
+from car3d.compat import require_subject_detail
 from car3d.geometry import GeometrySignature, signature_from_cloud
 from car3d.render import turntable_strip
 from cargen.core.asset import VehicleAsset
@@ -165,6 +166,12 @@ class Target3DModel:
         and regenerates on demand instead: exports are ~20 MB per fusion and
         the dossier is opened far less often than sightings arrive.
         """
+        # Before any GPU time is spent: refuse subjects too small to carry
+        # detail. cargen's ee-adapter does this itself; on master it does not
+        # exist, and car3d.compat enforces the same bar so the protection does
+        # not depend on which branch happens to be checked out.
+        require_subject_detail(crop_bgr)
+
         pipeline = self._get_pipeline()
         asset = self.load() if self.exists() else VehicleAsset(name=self.target_id)
         snapshot = self._snapshot_cloud(asset)

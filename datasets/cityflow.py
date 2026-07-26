@@ -203,8 +203,14 @@ class CityFlowScenario:
         # excluded (99% of observed vetoes were passages overlapping in wall
         # time). Keep them, and let a pair with observed overlap say what it
         # actually observed: the minimum transit here is effectively zero.
+        # ...which means taking them ALL, not just those above transitions()'
+        # default -5s floor. That floor exists to drop annotation glitches, but
+        # in a cluster like S01 — where a vehicle is visible in five cameras at
+        # once and overlaps reach -70s — it was also silently discarding 22% of
+        # real hops, the deepest-overlapping ones, i.e. exactly the evidence
+        # this block argues must be kept. Ask for everything explicitly.
         by_pair: dict[tuple[str, str], list[float]] = {}
-        for t in self.transitions():
+        for t in self.transitions(min_gap_s=-math.inf):
             if t.from_camera not in gps or t.to_camera not in gps:
                 continue
             by_pair.setdefault((t.from_camera, t.to_camera), []).append(t.elapsed_s)
@@ -338,16 +344,39 @@ def _read_seqinfo_fps(cam_dir: Path, default: float) -> float:
     return float(m.group(1)) if m else default
 
 
+def timing_offsets_found(root: Path, name: str) -> bool:
+    """Whether real per-camera clock offsets exist for this scenario.
+
+    Callers use this to state the fallback rather than inherit it silently:
+    without offsets every cross-camera elapsed time is measured against a
+    clock the cameras never shared.
+    """
+    scen_dir = next((d for split in sorted(root.iterdir()) if split.is_dir()
+                     for d in [split / name] if d.is_dir()), None)
+    if scen_dir is None:
+        return False
+    return bool(_load_timing_offsets(scen_dir, root, name))
+
+
 def _load_timing_offsets(scen_dir: Path, root: Path, name: str) -> dict[str, float]:
     """Camera start offsets (seconds) onto the shared scenario clock.
 
-    AIC22 ships these as `cam_timing/<scenario>.txt` with lines
-    `<camera> <offset_seconds> [fps]`. Some releases place a per-scenario
-    file directly in the scenario dir. Absent => empty (single-clock), which
-    the loader treats as zero offset for every camera.
+    AIC22 ships these as `cam_timestamp/<scenario>.txt` with lines
+    `<camera> <offset_seconds> [fps]` — that is the directory name in the
+    AICity22_Track1_MTMC_Tracking release; `cam_timing` appears in some
+    write-ups and mirrors, so both are accepted. Some releases place a
+    per-scenario file directly in the scenario dir.
+
+    Absent => empty, which the loader treats as zero offset for every
+    camera. That fallback is the dangerous one: the cameras genuinely do
+    not share a clock, so zero offsets produce plausible-looking but wrong
+    transit times rather than an error. `timing_offsets_found()` exists so
+    callers can say out loud which case they are in.
     """
     candidates = [
+        root / "cam_timestamp" / f"{name}.txt",
         root / "cam_timing" / f"{name}.txt",
+        scen_dir / "cam_timestamp.txt",
         scen_dir / "cam_timing.txt",
         scen_dir / f"{name}.txt",
     ]

@@ -8,17 +8,75 @@ A real-time, distributed vehicle-tracking and re-identification research demo wh
 
 ```
 python -m venv .venv
-.venv\Scripts\activate               # Linux/macOS: source .venv/bin/activate
-pip install -r requirements.txt
-python start.py
+.venv\Scripts\python.exe start.py    # Linux/macOS: .venv/bin/python start.py
 ```
 
-That's the whole thing. `start.py` detects what's on the machine and runs the
-best demo it can: real CityFlow footage if you have the dataset, otherwise the
-synthetic world, which needs no downloads at all. It prints what it chose and
-why, opens the console, and tells you if it's on CPU or GPU.
+That's the whole thing. On a fresh checkout `start.py` finds nothing installed,
+shows you what it's about to do, asks once, and sets the environment up itself:
+the right torch build for this machine, the requirements, and the cargen 3D
+bridge if it can find a checkout. Then it restarts into the demo.
+
+After that it detects what's on the machine and runs the best demo it can: real
+CityFlow footage if you have the dataset, otherwise the synthetic world, which
+needs no downloads at all. It prints what it chose and why, opens the console,
+and tells you if it's on CPU or GPU.
 
 **No dataset, no GPU, and no cargen install required to see the system work.**
+
+Addressing `.venv\Scripts\python.exe` directly is deliberate — it needs no
+`activate`, so it can't accidentally install into your system Python, and on
+Windows it sidesteps the PowerShell execution policy that blocks `Activate.ps1`
+by default. Activate the venv first if you prefer; then plain `python start.py`
+does the same thing.
+
+### Setting up separately
+
+`start.py` delegates all of this to `setup_env.py`, which is stdlib-only and
+runs standalone:
+
+```
+python setup_env.py --check          # report what's installed, change nothing
+python setup_env.py                  # install it
+python setup_env.py --dry-run        # print the pip commands it would run
+python start.py --check              # same report, from the launcher
+python start.py --no-setup           # never install; fail if something's missing
+```
+
+**On torch and CUDA.** `pip install -r requirements.txt` on its own gets
+whatever build ultralytics resolves, which is CPU-only on Windows and Linux.
+A requirements file can't express a per-package `--index-url`, so `setup_env.py`
+does it: if `nvidia-smi` reports a GPU it installs torch from PyTorch's CUDA
+index *before* the requirements, and replaces an existing CPU build if it finds
+one. No CUDA Toolkit install is needed — the wheels bundle their own runtime.
+CUDA wheel tags move between releases; override with `EYES_TORCH_INDEX` if the
+default 404s. On a machine with no NVIDIA GPU the CPU build is correct and the
+step is skipped.
+
+**On cargen.** The 3D bridge is a separate local repo, not a PyPI package, so
+it can't be pinned in `requirements.txt`. `setup_env.py` searches for a checkout
+alongside this one; set `EYES_CARGEN_PATH` if yours lives elsewhere. Not finding
+it is not an error — everything except the 3D panel still runs.
+
+cargen's `master` and `ee-adapter` branches have diverged, and this repo works
+against either. `InsufficientDetail` — the refusal to reconstruct from a subject
+too small to carry detail — exists only on `ee-adapter`; `car3d/compat.py` takes
+cargen's class when present, defines an equivalent when not, and enforces the
+same 64px bar itself so the protection never depends on which branch happens to
+be checked out. That matters most on exactly this data: CityFlow crops run to a
+39px short side at the low end.
+
+`python start.py --check` reports whether the generative backends are real or
+stubs. Stub geometry is a procedural sedan — the fusion, provenance, and audit
+trail around it are real, but the shape is not a reconstruction. Real geometry
+needs cargen's SF3D checkout (or `CARGEN_SF3D_PATH`) and rembg; note rembg wants
+`numpy>=2.3`, which conflicts with this repo's pinned `1.26.4`, so it belongs in
+a separate environment.
+
+**On datasets.** These are the one thing setup can't do for you: VeRi-776 and
+VehicleID need a research-use request form, and CityFlow means accepting the
+AIC2022 license. See [DATASETS.md](DATASETS.md), and mind that CityFlow's
+detection globs `*/S*/c*/gt/gt.txt` — the `train/` level above `S01/` is
+required or the scenario won't be found.
 
 | | download | needed for |
 |---|---|---|
@@ -35,12 +93,101 @@ the harness never substitutes synthetic numbers for missing real ones.
 ### Everything else
 
 ```
-pytest -m "not slow"                 # 287 tests, pure logic + fixtures, no datasets
+pytest -m "not slow"                 # 298 tests, pure logic + fixtures, no datasets
 python -m eval.run                   # regenerates RESULTS.md + figures (needs datasets)
 python start.py --mode synthetic     # force the no-dataset demo
+python start.py --mode cityflow      # force real footage; fails loudly if absent
 python start.py --no-3d              # skip the 3D panel
-pip install -e path/to/cargen        # optional: enables the 3D bridge
 ```
+
+### Switching between synthetic and real data
+
+Three levers, in increasing order of permanence. Nothing here needs a code
+change; the mode is a function of what's on disk and what you ask for.
+
+**1. `--mode`, per run.** The default is `auto`, which resolves to `cityflow`
+if the dataset is found and `synthetic` otherwise. The explicit values differ
+in one way that matters:
+
+```
+python start.py --mode synthetic     # always works, dataset present or not
+python start.py --mode cityflow      # errors out if the data isn't found
+```
+
+Prefer naming the mode over relying on `auto`. `auto`'s fallback is friendly
+but silent — a typo in the directory layout leaves you watching synthetic
+cars and wondering why the footage looks wrong. `--mode cityflow` turns that
+into an error message that prints the path it actually looked at.
+
+**2. `EYES_CITYFLOW_ROOT`, per shell.** Auto-detection is just a presence
+check on a path, so repointing the variable feeds the same command different
+data:
+
+```
+$env:EYES_CITYFLOW_ROOT = "E:\datasets\CityFlow"           # this session
+[Environment]::SetEnvironmentVariable('EYES_CITYFLOW_ROOT','E:\datasets\CityFlow','User')
+```
+
+Defined in `datasets/config.py`, default `data/datasets/CityFlow`. The same
+pattern covers `EYES_VERI_ROOT` and `EYES_VEHICLEID_ROOT`, which feed
+`python -m eval.run` rather than the console. Pointing the variable at a
+nonexistent path is also the cleanest way to force synthetic without flags.
+
+**3. Which one you got.** The banner answers before anything runs, and on a
+failed switch the second line names the path it checked:
+
+```
+  mode        : synthetic world (no datasets needed)
+  CityFlow    : no  - not found at data\datasets\CityFlow
+```
+
+#### The two modes are not one pipeline with different inputs
+
+| | synthetic | cityflow |
+|---|---|---|
+| road graph | `build_default_world()` — fictional Gridville | `scen.to_road_graph()` — real camera GPS |
+| feed | `run_feed`, generated sightings | `run_cityflow_feed`, decodes `vdo.avi` |
+| database | `data/eyes.sqlite` | `data/eyes-cityflow.sqlite` |
+| crops | `data/crops` | `data/crops-cityflow` |
+| default speed | 8x real time | 4x |
+| `world_source` | `"synthetic"` | `"real"` |
+
+Separate databases are deliberate: switching modes never mixes the two
+evidence sets, and each launch wipes its own DB and crops, so you always
+start clean.
+
+That last row carries the weight. `world_source` is served at
+`GET /api/world_source`, and the console reads it to decide whether the map
+draws our fabricated street network or a real basemap under real camera
+positions. The two must never be mixed — real camera coordinates with
+invented street names drawn on top would present fiction as fact. So the
+mode is not a display toggle. It is a claim about what the coordinates mean.
+
+For what stays real, simulated, or stubbed *within* each mode — the synthetic
+world's controlled noise channels, the stubbed edge tier — see
+[Real vs simulated vs stubbed](#real-vs-simulated-vs-stubbed) below.
+
+### Noise you can ignore on first launch
+
+Real mode prints an alarming-looking block from onnxruntime:
+
+```
+*************** EP Error ***************
+EP Error ... RegisterTensorRTPluginsAsCustomOps Please install TensorRT ...
+Falling back to ['CUDAExecutionProvider', 'CPUExecutionProvider'] and retrying.
+... Error loading "onnxruntime_providers_cuda.dll" which depends on
+    "cublasLt64_13.dll" which is missing
+```
+
+That is the plate reader (`fast-plate-ocr`), not the tracker or the embedders.
+Its bundled onnxruntime wants TensorRT and a CUDA-13 runtime that the torch
+wheels do not ship; it falls back to CPU and works. Plate OCR is cheap enough
+that this costs nothing noticeable. Torch itself is unaffected — `start.py`'s
+`compute:` line is the authority on whether the GPU is actually in use, and it
+will still say `GPU - <your card>`.
+
+The `MergeShapeInfo ... Falling back to lenient merge` warnings that follow are
+from the same model and are equally harmless.
 
 ### On hardware
 
@@ -48,10 +195,11 @@ Runs on a laptop: the live console is a 0.6M-parameter appearance model plus
 video decode, ~400–650 MB of RAM. Nothing requires a GPU.
 
 If a CUDA-capable GPU **and** a CUDA build of torch are present, the embedders
-use it automatically — no flag. The stock `pip install torch` is often CPU-only,
-so `start.py` prints which device it actually got. The GPU matters most for the
-optional FastReID backbone (~40× heavier than the default) and for cargen's real
-3D backends, which need CUDA and are not installed by default.
+use it automatically — no flag. `setup_env.py` installs that build when it sees
+a GPU, and `start.py` prints which device it actually got, because a silent CPU
+build is the failure mode you'd otherwise only notice as slowness. The GPU
+matters most for the optional FastReID backbone (~40× heavier than the default)
+and for cargen's real 3D backends, which need CUDA.
 
 ## What the evaluation measures
 

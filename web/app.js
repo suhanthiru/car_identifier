@@ -61,6 +61,28 @@ function confMeterHtml(score, breakdown) {
   </div>`;
 }
 
+/* ---------------------------------------------------------------- banner */
+
+/** The provenance banner must describe what is actually on screen.
+ *
+ * index.html hard-codes the synthetic wording so that something honest
+ * renders before the world_source round-trip completes; in real mode that
+ * default is wrong in a way that matters — these are real vehicles, filmed
+ * on real streets, used under a research licence — so it is replaced here.
+ * The two states are deliberately worded to be unmistakable at a glance:
+ * one says nothing on screen is real, the other says everything is.
+ */
+function setBanner(source) {
+  const el = document.getElementById("banner-text");
+  if (!el) return;
+  const real = source === "real";
+  el.textContent = real
+    ? "REAL RESEARCH FOOTAGE — CityFlow / AI City Challenge, used under its "
+      + "non-commercial research licence. These are real vehicles on real streets."
+    : "SYNTHETIC DATA ONLY — every camera, vehicle and plate on this screen is simulated";
+  document.getElementById("banner").classList.toggle("banner-real", real);
+}
+
 /* ------------------------------------------------------------------- map */
 
 async function initMap() {
@@ -76,6 +98,7 @@ async function initMap() {
   document.getElementById("tb-cameras").textContent = `${cameras.length}/${cameras.length} CAMERAS`;
   document.getElementById("tb-subtitle").textContent =
     worldSource.source === "real" ? "REAL-DATA CONSOLE" : "SYNTHETIC RESEARCH CONSOLE";
+  setBanner(worldSource.source);
   // Pause works in both worlds -- both feeds share server.feed.FeedClock.
   initFeedControl();
   if (worldSource.source === "real") {

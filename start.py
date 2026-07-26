@@ -2,8 +2,14 @@
 
     python start.py
 
-Looks at what is actually available on this machine and runs the best
-demo it can, rather than failing on a missing prerequisite:
+On a fresh checkout this installs what it needs first (CUDA torch if the
+machine has an NVIDIA GPU, the requirements, the cargen 3D bridge if it can
+find it) and then runs. See setup_env.py for the details, or run
+`python start.py --check` to see what it would do without doing it.
+
+Once the environment is there, it looks at what is actually available on
+this machine and runs the best demo it can, rather than failing on a
+missing prerequisite:
 
 - CityFlow present  -> real-data console (real footage, real cameras)
 - CityFlow absent   -> synthetic world (always works, no downloads)
@@ -19,6 +25,7 @@ import argparse
 import asyncio
 import os
 import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -27,8 +34,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import httpx
-import uvicorn
+# Only stdlib and setup_env (also stdlib-only) at module scope: on a fresh
+# checkout the third-party imports below would be the first thing to fail,
+# and a traceback is a worse answer than an offer to install them.
+import setup_env
 
 BANNER = "=" * 66
 
@@ -47,17 +56,38 @@ def _detect_cityflow() -> tuple[bool, str]:
 
 
 def _detect_cargen() -> tuple[bool, str]:
+    """(available, what the 3D panel will actually produce).
+
+    `import trimesh` used to stand in for "real backend available", which was
+    wrong in the direction that matters: trimesh is a mesh library, not a
+    reconstructor, so the banner claimed real geometry while both generative
+    backends were quietly falling back to stubs. Probe the two backends cargen
+    would really build — cheap, since each fails on a missing import or a
+    missing checkout rather than by loading weights.
+    """
     try:
         import cargen  # noqa: F401
     except Exception as exc:                      # noqa: BLE001
         return False, f"not installed ({type(exc).__name__})"
-    # Present, but the heavy generative backends are a separate install and
-    # need CUDA; say so plainly rather than implying a real reconstruction.
-    try:
-        import trimesh  # noqa: F401
-        return True, "installed, real 3D prior backend available"
-    except ImportError:
-        return True, "installed (stub prior: procedural shape, provenance is real)"
+
+    from cargen import backends
+
+    def _probe(build) -> bool:
+        try:
+            build()
+            return True
+        except Exception:                         # noqa: BLE001 — absent == stub
+            return False
+
+    prior = _probe(backends.build_prior_generator)
+    seg = _probe(backends.build_segmenter)
+    if prior and seg:
+        return True, "installed, real prior + segmenter"
+    if prior or seg:
+        got = "prior" if prior else "segmenter"
+        return True, f"installed, real {got} only (the other falls back to a stub)"
+    return True, ("installed, STUB geometry only — procedural sedan, not a "
+                  "reconstruction (provenance and fusion are real)")
 
 
 def _device_note() -> str:
@@ -88,6 +118,8 @@ def _print_plan(mode: str, cityflow: tuple[bool, str], cargen: tuple[bool, str],
 
 
 def _wait_for_server(base: str, timeout_s: float = 60.0) -> None:
+    import httpx
+
     deadline = time.monotonic() + timeout_s
     last: Exception | None = None
     while time.monotonic() < deadline:
@@ -151,6 +183,16 @@ def run_cityflow(port: int, time_scale: float, open_browser: bool, scenario: str
           f"{len(scen.spans)} ground-truth tracks, "
           f"{len(graph.edges)} observed transit routes")
 
+    # Cameras in a scenario start recording at different wall-clock times.
+    # Without the offsets every cross-camera elapsed time is wrong in a way
+    # that still looks reasonable, so say which case this run is in.
+    from datasets.cityflow import timing_offsets_found
+    if not timing_offsets_found(Path(root), scenario):
+        print(f"  WARNING: no camera timing offsets for {scenario} "
+              f"(expected {root}\\cam_timestamp\\{scenario}.txt).\n"
+              f"           Cameras do not share a clock; transit times will be "
+              f"wrong without them.")
+
     # Calibration is per-deployment AND per-embedder; if the artifact for this
     # scenario is missing the cascade falls back to an uncalibrated curve and
     # says so, rather than silently borrowing another deployment's numbers.
@@ -179,7 +221,9 @@ def run_cityflow(port: int, time_scale: float, open_browser: bool, scenario: str
     _idle(server, sum(counts.values()), len(counts))
 
 
-def _serve(app, port: int) -> uvicorn.Server:
+def _serve(app, port: int) -> "uvicorn.Server":
+    import uvicorn
+
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port,
                                            log_level="warning"))
     threading.Thread(target=server.run, daemon=True).start()
@@ -198,6 +242,54 @@ def _idle(server: uvicorn.Server, sightings: int, cameras: int) -> None:
         print("  bye")
 
 
+def _ensure_environment(*, force: bool, refuse: bool) -> bool:
+    """Install missing dependencies before the demo needs them.
+
+    Returns False when the caller should stop. Installing several GB without
+    asking would be rude, so an interactive run confirms first; a
+    non-interactive one (CI, a pipe) refuses and prints the command instead
+    of silently blocking on a prompt nobody can answer.
+    """
+    if refuse or not (force or setup_env.needs_setup()):
+        missing = setup_env.missing_core()
+        if missing and refuse:
+            print(f"missing: {', '.join(missing)}. Drop --no-setup, or:\n"
+                  f"  {Path(sys.executable).name} -m pip install -r requirements.txt")
+            return False
+        return True
+
+    print(BANNER)
+    print("  EYES EVERYWHERE - first-run setup")
+    print(BANNER)
+    setup_env.print_report()
+    print(BANNER)
+    print("\n  Setting this up means a multi-GB download (torch and friends).")
+
+    if not sys.stdin.isatty():
+        print(f"  Not an interactive terminal, so not starting it unasked. Run:\n"
+              f"    python setup_env.py\n")
+        return False
+    try:
+        if input("  Install now? [Y/n] ").strip().lower() in ("n", "no"):
+            print("  Skipped. `python setup_env.py` when you're ready.")
+            return False
+    except (EOFError, KeyboardInterrupt):
+        print("\n  Cancelled.")
+        return False
+
+    if not setup_env.bootstrap():
+        print("\n  Setup did not complete; see the pip output above.")
+        return False
+
+    # The freshly-installed packages are invisible to this process — it has
+    # already resolved (and in torch's case cached) the old import state. Hand
+    # off to a new interpreter rather than importing into a stale one.
+    print("\n  Setup complete — restarting.\n")
+    argv = [a for a in sys.argv[1:] if a not in ("--setup",)]
+    raise SystemExit(subprocess.run([sys.executable, str(Path(__file__).resolve()),
+                                     *argv]).returncode)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -211,7 +303,27 @@ def main() -> None:
     parser.add_argument("--no-browser", action="store_true")
     parser.add_argument("--no-3d", action="store_true",
                         help="skip the 3D panel even if cargen is installed")
+    parser.add_argument("--check", action="store_true",
+                        help="report the environment and exit, installing nothing")
+    parser.add_argument("--setup", action="store_true",
+                        help="run the install step even if nothing looks missing")
+    parser.add_argument("--no-setup", action="store_true",
+                        help="never install; fail instead if something is missing")
     args = parser.parse_args()
+
+    if args.check:
+        print(BANNER)
+        print("  EYES EVERYWHERE - environment")
+        print(BANNER)
+        setup_env.print_report()
+        cargen = _detect_cargen()
+        print(f"  3D backend  : {cargen[1]}")
+        cityflow = _detect_cityflow()
+        print(f"  CityFlow    : {'yes - ' if cityflow[0] else 'no  - '}{cityflow[1]}")
+        print(BANNER)
+        return
+    if not _ensure_environment(force=args.setup, refuse=args.no_setup):
+        return
 
     cityflow = _detect_cityflow()
     cargen = _detect_cargen()

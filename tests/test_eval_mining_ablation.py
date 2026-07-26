@@ -102,6 +102,24 @@ def test_ablation_cascade_beats_raw_on_lookalikes():
     assert "refused to pick" in reasons
 
 
+def test_precision_is_undefined_not_perfect_when_nothing_alerts():
+    """Zero alerts must not read as flawless accuracy.
+
+    Regression: both arms once reported 100.0% precision on 0 alerts, which
+    is the most flattering possible way to say the experiment never ran.
+    """
+    gallery = [img("1", "c9")]
+    queries = [img("1", "c1")]
+    g_emb = embeddings_for([[1, 0, 0]])
+    q_emb = embeddings_for([[1, 0, 0]])
+
+    metrics, _ = run_ablation(queries, q_emb, gallery, g_emb, threshold=1.5)
+    for m in metrics:
+        assert m.alerts == 0
+        assert m.precision != m.precision, "precision must be NaN, not 1.0"
+        assert m.f1 != m.f1
+
+
 def test_ablation_attr_veto_fires():
     gallery = [img("1", "c9", color="red")]
     queries = [img("9", "c1", color="blue")]  # high sim but wrong color

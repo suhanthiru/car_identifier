@@ -49,7 +49,14 @@ class PolicyMetrics:
 
     @property
     def precision(self) -> float:
-        return self.true_positives / self.alerts if self.alerts else 1.0
+        """NaN when nothing alerted — undefined, not perfect.
+
+        Returning 1.0 here reads as "never wrong" in the results table when
+        the truth is "never spoke". Both arms of the ablation once printed
+        100.0% precision on zero alerts, which is the most flattering way
+        possible to say that the experiment did not run.
+        """
+        return self.true_positives / self.alerts if self.alerts else float("nan")
 
     @property
     def recall(self) -> float:

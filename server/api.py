@@ -293,8 +293,8 @@ def create_app(
         """
         import cv2
 
+        from car3d.compat import InsufficientDetail
         from car3d.geometry import signature_to_attrs
-        from cargen.prior_generation.interface import InsufficientDetail
 
         crop_path = state.crops_dir / f"{event_id}.png"
         crop = cv2.imread(str(crop_path)) if crop_path.exists() else None
@@ -367,8 +367,14 @@ def create_app(
             return
         try:
             job.result(timeout=timeout)
-        except Exception:  # noqa: BLE001 — already reported by the worker
-            pass
+        except Exception as exc:  # noqa: BLE001 — 3D must never sink a request
+            # _run_fusion reports everything it catches, but it cannot report
+            # what it never entered: an import error or a signature change at
+            # the top of the worker escapes past its try. Swallowing that
+            # silently is how a completely dead 3D path looked like an empty
+            # panel for weeks. Say it here instead.
+            print(f"car3d: fusion worker for {target_id} died before reporting: "
+                  f"{type(exc).__name__}: {exc}")
 
     # ------------------------------------------------------------ helpers
 

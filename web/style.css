@@ -26,6 +26,12 @@ body {
   flex: none;
 }
 #banner a { color: #ffe4ad; }
+/* Real footage gets its own colour, so the two provenance states are never
+   distinguishable only by reading the sentence. */
+#banner.banner-real {
+  background: #122a1c; color: #8ee0a8; border-bottom-color: #1f5236;
+}
+#banner.banner-real a { color: #b6f0c8; }
 
 .mono { font-family: Consolas, ui-monospace, Menlo, monospace; }
 .accent { color: var(--accent); }

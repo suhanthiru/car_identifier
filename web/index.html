@@ -8,7 +8,11 @@
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
-<div id="banner">SYNTHETIC DATA ONLY — every camera, vehicle and plate on this screen is simulated
+<!-- Text is authoritative only after initMap() reconciles it with
+     GET /api/world_source; this default is the safe one to render first,
+     since claiming "simulated" about real footage is the less dangerous
+     way to be briefly wrong. See setBanner() in app.js. -->
+<div id="banner"><span id="banner-text">SYNTHETIC DATA ONLY — every camera, vehicle and plate on this screen is simulated</span>
   <a href="inspector.html">&rarr; reasoning inspector (see the cascade think)</a></div>
 
 <div id="topbar">

@@ -25,14 +25,49 @@ EMBED_ARCH = "osnet_x0_25 (torchreid, ImageNet-pretrained; VeRi-776-trained "\
     "weights are a manual download — see README)"
 
 
-def _pending(name: str, why: str) -> str:
-    return (f"## {name}\n\n**PENDING — dataset not present.** {why} "
-            f"See [DATASETS.md](DATASETS.md) for the request/download steps. "
+def _pending(name: str, why: str, headline: str = "dataset not present",
+             see_datasets: bool = True) -> str:
+    """A PENDING block that names the actual blocker.
+
+    `headline` is parameterised because not every gap is a missing dataset:
+    the per-embedder section needs summary artifacts produced by scripts that
+    are too expensive to run inline, and reporting that as "dataset not
+    present" sends the reader to DATASETS.md to re-download data they already
+    have.
+    """
+    tail = ("See [DATASETS.md](DATASETS.md) for the request/download steps. "
+            if see_datasets else "")
+    return (f"## {name}\n\n**PENDING — {headline}.** {why} {tail}"
             f"This section is generated only from real data; nothing is "
             f"simulated in its place.\n")
 
 
 # --------------------------------------------------------------- veri block
+
+def _threshold_note(report) -> str:
+    """Say whether the target precision was actually reached.
+
+    "chosen for target precision 0.95" reads as a guarantee. When no live
+    threshold reaches the target, `choose_threshold` deliberately falls back
+    to the best-F1 point — a materially different claim, and on a weak
+    embedder the honest headline: a similarity threshold cannot separate
+    these look-alikes at any operating point.
+    """
+    at = min((p for p in report.sweep
+              if abs(p.threshold - report.chosen_threshold) < 1e-9),
+             key=lambda p: p.threshold, default=None)
+    reached = at is not None and at.precision >= report.target_precision
+    if reached:
+        return (f"Alert threshold {report.chosen_threshold:.3f} meets the "
+                f"{report.target_precision:.2f} target precision.")
+    got = f"{at.precision:.1%}" if at is not None else "unknown"
+    return (f"Alert threshold {report.chosen_threshold:.3f} — **no threshold "
+            f"reached the {report.target_precision:.2f} target precision** "
+            f"(best achievable here: {got}), so this is the best-F1 fallback. "
+            f"That is the finding, not a configuration detail: on these mined "
+            f"look-alikes this embedder's similarity does not separate identity "
+            f"at any operating point.")
+
 
 def veri_section(quick: bool) -> str:
     from datasets.veri776 import Veri776
@@ -113,9 +148,8 @@ def veri_section(quick: bool) -> str:
         "",
         f"{len(pairs)} pairs ({n_hard} hard negatives = same-color same-body "
         f"different-vehicle, mined by bucket). Calibration version "
-        f"`isotonic-{report.model.version}`; ECE {rel.ece:.3f}. Alert threshold "
-        f"{report.chosen_threshold:.3f} chosen for target precision "
-        f"{report.target_precision:.2f}; hard-negative FPR at that threshold: "
+        f"`isotonic-{report.model.version}`; ECE {rel.ece:.3f}. "
+        f"{_threshold_note(report)} Hard-negative FPR at that threshold: "
         f"{report.hard_negative_fpr_at_threshold:.1%}.",
         "",
         "![reliability](eval/figures/veri_reliability.png)",
@@ -131,17 +165,35 @@ def veri_section(quick: bool) -> str:
         "| policy | precision | recall | F1 | alerts | false positives | reviews |",
         "|---|---|---|---|---|---|---|",
     ]
+    def _pct(v: float) -> str:
+        # An undefined rate must not render as a number a reader can quote.
+        return "n/a" if v != v else f"{v:.1%}"
+
     for m in (raw, cas):
         r = m.row()
-        lines.append(f"| {r['policy']} | {r['precision']:.1%} | {r['recall']:.1%} "
-                     f"| {r['f1']:.1%} | {r['alerts']} | {r['false_positives']} "
+        lines.append(f"| {r['policy']} | {_pct(m.precision)} | {_pct(m.recall)} "
+                     f"| {_pct(m.f1)} | {r['alerts']} | {r['false_positives']} "
                      f"| {r['review_rate']} |")
-    dp = cas.precision - raw.precision
     fp_cut = (1 - cas.false_positives / raw.false_positives) if raw.false_positives else 0.0
+    lines.append("")
+    if not raw.alerts and not cas.alerts:
+        # Say it outright rather than let a table of n/a imply a tie.
+        lines.append(
+            "**No alerts fired under either policy, so there is no delta to "
+            "report.** Every top-1 similarity fell below the chosen threshold — "
+            "the comparison did not run. This is a statement about the embedder, "
+            "not about the cascade: an ImageNet-pretrained OSNet-x0_25 does not "
+            "separate VeRi-776 identities well enough to reach an alerting "
+            "threshold at all (see the retrieval table above). Re-run with "
+            "VeRi-776-trained weights or the FastReID backbone to measure the "
+            "cascade's contribution.")
+    else:
+        dp = cas.precision - raw.precision
+        lines.append(
+            f"**Delta: {_pct(dp) if dp == dp else 'n/a'} precision; {fp_cut:.0%} "
+            f"of raw false positives eliminated by the attribute veto + "
+            f"look-alike ambiguity refusal.**")
     lines += [
-        "",
-        f"**Delta: {dp:+.1%} precision; {fp_cut:.0%} of raw false positives "
-        f"eliminated by the attribute veto + look-alike ambiguity refusal.**",
         "",
         "### Failure cases (honest, not curated away)",
         "",
@@ -332,6 +384,56 @@ def _load_json(path: Path):
     return json.loads(path.read_text()) if path.is_file() else None
 
 
+def _separability_commentary(sep_by_key: dict[str, dict]) -> str:
+    """Describe the separability table using only rows that are in it.
+
+    This paragraph used to be a fixed string quoting both embedders' numbers.
+    With only the default backbone measured — the usual case, since FastReID
+    needs a 198 MB checkpoint — RESULTS.md asserted a finetuned figure of
+    "~0.64" that no run had produced. Prose narrating uncomputed numbers is
+    the exact failure this document exists to avoid, so it is generated.
+    """
+    osnet = sep_by_key.get("osnet")
+    fast = sep_by_key.get("fastreid")
+    parts = []
+    ceilings = [f["same_camera_auc"] for f in sep_by_key.values()]
+    if ceilings:
+        multi = len(ceilings) > 1
+        which = "Both embedders score" if multi else "The embedder scores"
+        span = (f"{min(ceilings):.2f}–{max(ceilings):.2f}" if multi
+                else f"{ceilings[0]:.2f}")
+        parts.append(
+            f"(1) {which} {span} on the same-camera ceiling, so crops, "
+            f"preprocessing and model loading are all sound — whatever is "
+            f"failing is not the plumbing.")
+    if osnet:
+        parts.append(
+            f"(2) The ImageNet-pretrained default sits at {osnet['fair_auc']:.2f} "
+            f"cross-camera, i.e. near chance: it encodes viewpoint-conditioned "
+            f"appearance, not vehicle identity.")
+    if fast:
+        parts.append(
+            f"The vehicle-finetuned checkpoint lifts that to "
+            f"{fast['fair_auc']:.2f}, a real gain but far from solved.")
+    else:
+        parts.append(
+            "The vehicle-finetuned comparison is absent from this run: no "
+            "FastReID summary was generated (see README for the checkpoint), "
+            "so no claim is made about what finetuning would buy.")
+    advs = [f["adversarial_auc"] for f in sep_by_key.values()]
+    if advs:
+        scope = "for BOTH" if len(advs) > 1 else "for the measured embedder"
+        span = (f"{min(advs):.2f}–{max(advs):.2f}" if len(advs) > 1
+                else f"{advs[0]:.2f}")
+        parts.append(
+            f"(3) The adversarial column stays at {span} "
+            f"{scope} — on the most-confusable tail, appearance alone remains "
+            f"worse than a coin flip. That residue is the genuine look-alike "
+            f"problem, and it is an argument for refusing to individuate on "
+            f"appearance rather than for buying a better model.")
+    return "Reading the table. " + " ".join(parts)
+
+
 def embedder_section() -> str:
     """Cross-camera separability, retrieval and the two-sided operational
     metric, per embedder.
@@ -343,6 +445,7 @@ def embedder_section() -> str:
     missing dataset, and no number is ever carried over from a previous run.
     """
     rows_sep, rows_retr, rows_ops = [], [], []
+    sep_by_key: dict[str, dict] = {}
     for key, label in _EMBEDDER_LABELS.items():
         tag = "s01" if key == "osnet" else f"s01_{key}"
         sep = _load_json(Path(f"data/separability_{tag}.json"))
@@ -351,6 +454,7 @@ def embedder_section() -> str:
 
         if sep:
             f = sep["fair_protocol"]
+            sep_by_key[key] = f
             rows_sep.append(
                 f"| {label} | {f['fair_auc']:.3f} | {f['adversarial_auc']:.3f} | "
                 f"{f['same_camera_auc']:.3f} | {f['difficulty_gap']:.3f} |")
@@ -384,10 +488,13 @@ def embedder_section() -> str:
     if not (rows_sep or rows_retr or rows_ops):
         return _pending(
             "CityFlow: embedder separability, retrieval, recall/FPR",
-            "Run `scripts/inspect_cityflow_calibration.py`, "
+            "These runs cost minutes of embedding per embedder, so they are "
+            "not executed inline. Run `scripts/inspect_cityflow_calibration.py`, "
             "`scripts/eval_cityflow_retrieval.py` and "
             "`scripts/analyze_cityflow_recognizability.py` (per embedder) to "
-            "produce the summaries this section reads.")
+            "produce the summaries this section reads.",
+            headline="per-embedder summaries not generated yet",
+            see_datasets=False)
 
     out = [
         "## CityFlow S01: can the embedder do cross-camera at all?",
@@ -415,18 +522,7 @@ def embedder_section() -> str:
             "|---|---|---|---|---|",
             *rows_sep,
             "",
-            "Three things to read off this table. (1) Both embedders score "
-            "~0.94 on the same-camera ceiling, so crops, preprocessing and "
-            "model loading are all sound — whatever is failing is not the "
-            "plumbing. (2) The ImageNet-pretrained default sits at ~0.52 "
-            "cross-camera, i.e. chance: it encodes viewpoint-conditioned "
-            "appearance, not vehicle identity. The vehicle-finetuned "
-            "checkpoint lifts that to ~0.64, a real gain but far from solved. "
-            "(3) The adversarial column stays near 0.1 for BOTH — on the "
-            "most-confusable tail, appearance alone remains worse than a coin "
-            "flip no matter which embedder is used. That residue is the "
-            "genuine look-alike problem, and it is an argument for refusing to "
-            "individuate on appearance rather than for buying a better model.",
+            _separability_commentary(sep_by_key),
             "",
             "An earlier reading of this data claimed the embedder ranked "
             "different cars *above* same cars (AUC 0.102). That figure came "
@@ -476,8 +572,13 @@ def embedder_section() -> str:
             "for review and never asserts an individual. Four co-plausible "
             "vehicles is a set, and it says so.",
             "",
-            "Three defects were then found and fixed, measured in sequence on "
-            "the FastReID configuration:",
+            "Three defects were then found and fixed. The table below is a "
+            "**recorded history, not a recomputed result**: these figures come "
+            "from an earlier FastReID run and are reproduced verbatim so the "
+            "sequence of fixes stays auditable. Unlike every other table in "
+            "this document, re-running `python -m eval.run` does not "
+            "regenerate it — re-measure with the FastReID checkpoint to "
+            "confirm the numbers still hold.",
             "",
             "| stage | recall | FPR | same-colour FPR |",
             "|---|---|---|---|",

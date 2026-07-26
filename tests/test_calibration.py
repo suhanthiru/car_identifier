@@ -72,6 +72,44 @@ def test_chosen_threshold_meets_target_or_best_f1(pairs):
     assert point.precision >= 0.9 or t == best_f1.threshold
 
 
+def test_threshold_above_all_similarities_is_never_chosen(pairs):
+    """A threshold that accepts nothing scores 0/0 precision, reported as 1.0.
+
+    Regression: that vacuous point used to win — on VeRi-776 it selected
+    0.960 when the highest observed similarity was 0.957, so the alert policy
+    provably never alerted, and RESULTS.md published it as 100% precision on
+    both arms of the ablation. A policy that never fires is not a policy that
+    never errs.
+    """
+    sweep = pr_sweep(pairs)
+    highest = max(p.similarity for p in pairs)
+    t = choose_threshold(sweep, target_precision=0.95)
+    assert t <= highest, f"chose {t}, above every observed similarity {highest}"
+    chosen = min((p for p in sweep if abs(p.threshold - t) < 1e-9),
+                 key=lambda p: p.threshold)
+    assert not chosen.degenerate
+    assert chosen.n_predicted > 0
+
+
+def test_sweep_marks_degenerate_points(pairs):
+    sweep = pr_sweep(pairs, thresholds=np.array([0.0, 1.5]))
+    accepts_all, accepts_none = sweep
+    assert accepts_all.n_predicted == len(pairs)
+    assert not accepts_all.degenerate
+    assert accepts_none.n_predicted == 0
+    assert accepts_none.degenerate
+    # The 1.0 is the 0/0 placeholder the bug relied on; keep it visible so
+    # nothing starts treating it as a measurement again.
+    assert accepts_none.precision == 1.0
+
+
+def test_sweep_with_no_live_points_refuses_to_choose():
+    """Better to raise than to invent an operating point from an empty sweep."""
+    empty = pr_sweep([], thresholds=np.array([0.5, 0.9]))
+    with pytest.raises(ValueError, match="zero pairs"):
+        choose_threshold(empty)
+
+
 def test_report_save_load_roundtrip(pairs, tmp_path):
     report = build_report(pairs)
     path = tmp_path / "cal.json"

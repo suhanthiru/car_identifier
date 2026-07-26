@@ -51,6 +51,17 @@ class SweepPoint:
     precision: float
     recall: float
     f1: float
+    n_predicted: int = 0        # tp + fp: how many pairs this threshold accepts
+
+    @property
+    def degenerate(self) -> bool:
+        """True when the threshold accepts nothing.
+
+        Its `precision` is then 0/0, reported as 1.0 by convention — a
+        placeholder, not a measurement. Nothing may select a threshold on the
+        strength of it: a threshold that never fires is trivially never wrong.
+        """
+        return self.n_predicted == 0
 
 
 @dataclass(frozen=True)
@@ -107,7 +118,7 @@ def pr_sweep(pairs: list[SimilarityPair], thresholds: np.ndarray | None = None
         recall = tp / (tp + fn) if tp + fn else 0.0
         f1 = (2 * precision * recall / (precision + recall)
               if precision + recall else 0.0)
-        points.append(SweepPoint(float(t), precision, recall, f1))
+        points.append(SweepPoint(float(t), precision, recall, f1, tp + fp))
     return tuple(points)
 
 
@@ -119,11 +130,26 @@ def choose_threshold(sweep: tuple[SweepPoint, ...], target_precision: float = 0.
     — hard negatives are near-duplicates by construction. Falling back to
     the best-F1 point is deliberate: it demonstrates that a similarity
     threshold cannot separate look-alikes, which is the project's thesis.
+
+    Degenerate points are excluded first. A threshold above every observed
+    similarity accepts nothing, so its precision is 0/0 — reported as 1.0 —
+    and it would otherwise be *preferred* over every real candidate on weak
+    embeddings. That is how this function came to return 0.960 on VeRi-776
+    where the highest query top-1 similarity is 0.957: an alert policy that
+    provably never alerts, scored as perfect precision, which then propagated
+    into RESULTS.md as a 100%/100% ablation measuring nothing. A threshold
+    that never fires is not a threshold that never errs.
     """
-    meeting = [p for p in sweep if p.precision >= target_precision]
+    live = [p for p in sweep if not p.degenerate]
+    if not live:
+        raise ValueError(
+            "every threshold in the sweep accepts zero pairs — the similarity "
+            "range and the sweep range do not overlap; nothing can be chosen "
+            "honestly from this data")
+    meeting = [p for p in live if p.precision >= target_precision]
     if meeting:
         return min(meeting, key=lambda p: p.threshold).threshold
-    return max(sweep, key=lambda p: p.f1).threshold
+    return max(live, key=lambda p: p.f1).threshold
 
 
 def build_report(pairs: list[SimilarityPair], target_precision: float = 0.95,
@@ -155,7 +181,12 @@ def save(report: CalibrationReport, path: str | Path) -> None:
         "chosen_threshold": report.chosen_threshold,
         "target_precision": report.target_precision,
         "hard_negative_fpr_at_threshold": report.hard_negative_fpr_at_threshold,
-        "sweep": [[s.threshold, s.precision, s.recall, s.f1] for s in report.sweep],
+        # n_predicted is carried so a reader can tell a real operating point
+        # from one whose 1.0 precision is the 0/0 placeholder. Dropping it
+        # would let a rehydrated sweep look uniformly degenerate — or worse,
+        # uniformly trustworthy.
+        "sweep": [[s.threshold, s.precision, s.recall, s.f1, s.n_predicted]
+                  for s in report.sweep],
     }
     p.write_text(json.dumps(payload, indent=1))
 
