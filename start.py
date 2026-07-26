@@ -132,17 +132,26 @@ def _wait_for_server(base: str, timeout_s: float = 60.0) -> None:
     raise RuntimeError(f"server did not come up within {timeout_s:.0f}s ({last})")
 
 
-def _reset(db_path: Path, crops_dir: Path) -> Path:
+def _reset(db_path: Path, crops_dir: Path, targets3d_dir: Path | None = None) -> Path:
     """Clear the previous run so each launch starts clean. Falls back to a
-    timestamped DB if another process still holds the file open."""
+    timestamped DB if another process still holds the file open.
+
+    The 3D models must go too. Target ids restart at `tgt-001` every launch,
+    so a surviving `data/targets3d/tgt-001` is silently adopted by whatever
+    vehicle happens to be flagged first next time — the new run fuses into the
+    old run's asset and reports its splat count, which is how a session with a
+    real SF3D backend produced a 20k-splat cloud built by a previous session's
+    stub. Same-name reuse across runs is contamination, not caching.
+    """
     if db_path.exists():
         try:
             db_path.unlink()
         except PermissionError:
             db_path = db_path.with_name(f"{db_path.stem}-{int(time.time())}.sqlite")
             print(f"  note: previous database still in use; using {db_path.name}")
-    if crops_dir.exists():
-        shutil.rmtree(crops_dir, ignore_errors=True)
+    for stale in (crops_dir, targets3d_dir):
+        if stale is not None and stale.exists():
+            shutil.rmtree(stale, ignore_errors=True)
     return db_path
 
 
@@ -152,7 +161,8 @@ def run_synthetic(port: int, time_scale: float, open_browser: bool) -> None:
     from server.feed import FeedConfig, run_feed
     from sim.emitter import build_default_world
 
-    db_path = _reset(Path("data/eyes.sqlite"), Path("data/crops"))
+    db_path = _reset(Path("data/eyes.sqlite"), Path("data/crops"),
+                     Path("data/targets3d"))
     app = create_app(db_url=f"sqlite:///{db_path.as_posix()}")
     server = _serve(app, port)
     base = f"http://127.0.0.1:{port}"
@@ -201,10 +211,15 @@ def run_cityflow(port: int, time_scale: float, open_browser: bool, scenario: str
         print(f"  note: no calibration for {scenario}; using the uncalibrated "
               f"fallback (run scripts/calibrate_cityflow.py to fit one)")
 
-    db_path = _reset(Path("data/eyes-cityflow.sqlite"), Path("data/crops-cityflow"))
+    # Separate 3D directory per mode, for the same reason crops are separate:
+    # a synthetic sprite's model and a real vehicle's model must never share
+    # a target id's directory.
+    db_path = _reset(Path("data/eyes-cityflow.sqlite"), Path("data/crops-cityflow"),
+                     Path("data/targets3d-cityflow"))
     app = create_app(
         graph=graph, db_url=f"sqlite:///{db_path.as_posix()}",
         crops_dir="data/crops-cityflow", world_source="real",
+        targets3d_dir="data/targets3d-cityflow",
         calibration_path=str(calibration) if calibration.is_file() else "",
         cityflow_root=root, cityflow_scenario_name=scenario)
     server = _serve(app, port)

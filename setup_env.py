@@ -39,12 +39,13 @@ DEFAULT_TORCH_INDEX = "https://download.pytorch.org/whl/cu128"
 # whole dependency set (pip is the authority on that).
 CORE_MODULES = ("httpx", "uvicorn", "fastapi", "sqlmodel", "numpy")
 
-# Enables cargen's real 3D prior instead of the procedural stub — this is what
-# start.py's _detect_cargen probes for. Deliberately NOT including rembg
-# (cargen's background remover): it requires numpy>=2.3 and would silently
-# break this repo's pinned numpy==1.26.4. Install it into a separate env if you
-# need it; see cargen's own docs/SETUP.md.
-CARGEN_EXTRAS = ("trimesh", "pillow")
+# Mesh tooling plus cargen's background remover. rembg is PINNED to 2.0.57 on
+# purpose: 2.0.76+ requires numpy>=2.3, which collides with this repo's
+# numpy==1.26.4 and with SF3D's own pins. 2.0.57 is the version SF3D pins and
+# it works with numpy 1.26 — an unpinned `pip install rembg` silently upgrades
+# numpy and breaks both. Real image-to-3D geometry needs SF3D as well; see the
+# README's 3D section, which start.py's --check reports on.
+CARGEN_EXTRAS = ("trimesh", "pillow", "rembg==2.0.57")
 
 # Pins that another package's resolver likes to walk over. Checked after every
 # install so a conflict surfaces here rather than as a numpy ABI error later.

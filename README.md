@@ -67,10 +67,55 @@ be checked out. That matters most on exactly this data: CityFlow crops run to a
 
 `python start.py --check` reports whether the generative backends are real or
 stubs. Stub geometry is a procedural sedan — the fusion, provenance, and audit
-trail around it are real, but the shape is not a reconstruction. Real geometry
-needs cargen's SF3D checkout (or `CARGEN_SF3D_PATH`) and rembg; note rembg wants
-`numpy>=2.3`, which conflicts with this repo's pinned `1.26.4`, so it belongs in
-a separate environment.
+trail around it are real, but the shape is not a reconstruction:
+
+```
+3D backend  : installed, STUB geometry only — procedural sedan, ...
+3D backend  : installed, real prior + segmenter          <- what you want
+```
+
+### Real 3D geometry (SF3D)
+
+Optional, and a genuine install. Needs an NVIDIA GPU, VS Build Tools with the
+C++ workload, and a Hugging Face account that has accepted the Stability AI
+Community License on `stabilityai/stable-fast-3d` (the weights are gated;
+`huggingface-cli login` once).
+
+```
+git clone https://github.com/Stability-AI/stable-fast-3d \
+    <cargen>/third_party/stable-fast-3d
+pip install numpy==1.26.4 einops==0.7.0 jaxtyping==0.2.31 omegaconf==2.3.0 \
+    transformers==4.42.3 open_clip_torch==2.24.0 trimesh==4.4.1 \
+    huggingface-hub==0.23.4 rembg==2.0.57 pynanoinstantmeshes==0.0.3 \
+    gpytoolbox==0.2.0
+```
+
+Then the two C++ extensions, which must build inside the MSVC dev shell:
+
+```
+cmd /c 'call "...\VC\Auxiliary\Build\vcvars64.bat" && set USE_CUDA=0 && ^
+        set DISTUTILS_USE_SDK=1 && ^
+        python -m pip install ./uv_unwrapper ./texture_baker --no-build-isolation'
+```
+
+`DISTUTILS_USE_SDK=1` is not optional and is missing from most write-ups: with
+the VC environment already activated, torch's `cpp_extension` refuses to build
+without it and the failure looks unrelated to the cause. `USE_CUDA=0` builds
+the texture baker for CPU, which avoids needing the full CUDA Toolkit — cargen
+bridges the CPU baker to SF3D's GPU tensors itself. Override the checkout
+location with `CARGEN_SF3D_PATH`.
+
+**Two pins that matter.** `rembg` must stay at `2.0.57`: from 2.0.76 it
+requires `numpy>=2.3`, which collides with this repo's pinned `1.26.4` and with
+SF3D's own requirements. And `numpy` must stay at `1.26.4` — `setup_env.py`
+restores it if a later install walks over it.
+
+**Cost.** One reconstruction is ~98 s on an RTX 3080 Ti and produces ~120k
+splats (the stub produces ~20k instantly). Fusion is queued off the ingest path
+with a single worker, so the console stays responsive, but a target's 3D panel
+takes a minute or two to appear after the gate opens. The test suite is
+unaffected: `tests/conftest.py` pins cargen to its stub backends so
+`pytest -m "not slow"` stays at ~65 s whether or not SF3D is installed.
 
 **On datasets.** These are the one thing setup can't do for you: VeRi-776 and
 VehicleID need a research-use request form, and CityFlow means accepting the

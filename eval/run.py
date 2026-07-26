@@ -316,7 +316,40 @@ def threed_section() -> str:
     from datasets.veri776 import Veri776
 
     if Veri776.exists() and backend_ok:
-        return ""  # the veri section's ablation would then include the 3D row
+        # Both gates are open — but the row they were gating does not exist:
+        # veri_section calls run_ablation without the `extra_attrs` hook, so
+        # nothing merges 3D geometry into the contradiction check. Returning ""
+        # here used to delete the whole section at precisely the moment its
+        # prerequisites were satisfied, turning "PENDING, here is the plan"
+        # into silence. Say where it actually stands instead.
+        return "\n".join([
+            "## 3D-geometry ablation (car3d bridge)",
+            "",
+            "**NOT RUN — prerequisites met, experiment not wired up.** VeRi-776 "
+            "is present and a real cargen image-to-3D backend (SF3D) builds and "
+            "reconstructs; what is missing is the wiring, not the capability: "
+            "`veri_section` calls `run_ablation` without the `extra_attrs` hook, "
+            "so no 3D-derived attribute reaches the cascade's contradiction "
+            "check.",
+            "",
+            "The blocker is cost, and it should be stated rather than implied. "
+            "A single SF3D reconstruction measured on an RTX 3080 Ti takes "
+            "**~98 s** (120k splats). VeRi-776's evaluation split is 1678 query "
+            "+ 11579 gallery images, so reconstructing all of them is ~350 GPU-"
+            "hours — not a thing this harness can do inline. A defensible "
+            "version subsamples cross-view pairs, and choosing that subsample "
+            "is an experimental-design decision, not a configuration default; "
+            "until someone makes it deliberately, this section reports nothing "
+            "rather than a number whose sampling nobody chose.",
+            "",
+            "Planned, code in place (`eval/ablation.py` `extra_attrs` hook + "
+            "`car3d/geometry.py`): (a) cascade precision with vs without "
+            "3D-derived proportion attributes on cross-VIEW query/gallery "
+            "pairs, where 2D ReID degrades most; (b) geometry error vs number "
+            "of fused sightings, to substantiate — or refute — the claim that "
+            "the model firms up with corroboration.",
+            "",
+        ])
     missing = []
     if not Veri776.exists():
         missing.append("VeRi-776 (manual request, see DATASETS.md)")
