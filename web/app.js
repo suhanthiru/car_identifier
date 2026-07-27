@@ -281,6 +281,15 @@ async function initCityflowVehicleBrowser() {
 function renderVehicleTiles(vehicles) {
   const grid = document.getElementById("cityflow-vehicles");
   grid.innerHTML = "";
+  if (!vehicles.length) {
+    // Once the replay passes the last vehicle this list empties, and a bare
+    // grid reads as a broken panel rather than an exhausted one. Say which it
+    // is, and name the two ways forward.
+    grid.innerHTML = `<div class="vt-empty">Every vehicle in this scenario has
+      already driven through. Untick <b>still to come</b> to browse them anyway,
+      or <b>⟲ RESTART</b> to replay from t=0.</div>`;
+    return;
+  }
   vehicles.forEach((v) => {
     const tile = document.createElement("div");
     tile.className = "vehicle-tile";
