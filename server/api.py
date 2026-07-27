@@ -63,6 +63,7 @@ def create_app(
     crops_dir: str = "data/crops",
     calibration_path: str = "calibration/artifacts/latest.json",
     enable_3d: bool | None = None,
+    enable_3d_identification: bool | None = None,
     targets3d_dir: str = "data/targets3d",
     world_source: str = "synthetic",
     enable_plate_ocr: bool = True,
@@ -87,6 +88,18 @@ def create_app(
 
     if enable_3d is None:
         enable_3d = os.environ.get("EYES_ENABLE_3D", "0") == "1"
+    # Separate switch, default OFF, because the two uses of the 3D model have
+    # different evidence behind them. Showing an operator what was reconstructed
+    # is useful and honest. Letting that geometry vote on identity is not: the
+    # measured ablation (scripts/ablate_3d_cityflow.py, 795 real CityFlow crops)
+    # found it usable on only 14% of crops and, where usable, vetoing 4 correct
+    # matches for 0 incorrect ones. An attribute channel that contradicts on
+    # same-vehicle pairs as often as on different-vehicle pairs is worse than no
+    # channel. Turn it on deliberately, per deployment, with numbers to justify
+    # it — EYES_ENABLE_3D_IDENTIFICATION=1.
+    if enable_3d_identification is None:
+        enable_3d_identification = (
+            os.environ.get("EYES_ENABLE_3D_IDENTIFICATION", "0") == "1")
     if world_source not in ("synthetic", "real"):
         raise ValueError(f"world_source must be 'synthetic' or 'real', got {world_source!r}")
     graph = graph or default_world()
@@ -159,7 +172,7 @@ def create_app(
             print(f"car3d: render verification unavailable for {target_id}: {exc}")
             return None
 
-    if enable_3d:
+    if enable_3d and enable_3d_identification:
         # Feature D: the dependency-inverted hook reasoning/ declares but never
         # imports. Without this the verifier is built, tested and unreachable.
         from reasoning.cascade import CascadeConfig
@@ -174,6 +187,7 @@ def create_app(
     state.sim_now = 0.0
     state.target_seq = itertools.count(1)
     state.enable_3d = enable_3d
+    state.enable_3d_identification = enable_3d_identification
     state.targets3d_dir = Path(targets3d_dir)
     state.world_source = world_source
     # Real-clip mode only (perception/real_observe.py's RealPerceptor reads
@@ -315,7 +329,11 @@ def create_app(
             print(f"car3d: fusion failed for {target_id}: {exc}")
             return
 
-        geom_attrs = signature_to_attrs(outcome.geometry)
+        # The reconstruction still happened, is still exported, and is still
+        # shown in the dossier — only its promotion to identity evidence is
+        # gated. See create_app's enable_3d_identification.
+        geom_attrs = (signature_to_attrs(outcome.geometry)
+                      if state.enable_3d_identification else {})
         if not geom_attrs:
             return
         with state.tracker_lock:

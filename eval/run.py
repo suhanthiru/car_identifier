@@ -522,6 +522,15 @@ def _threed_measured(s: dict) -> str:
         "is no idealisation left in it, so a null result here is a finding "
         "about the feature rather than an artifact of the setup.",
         "",
+        "**What was done about it:** the geometry channel no longer feeds "
+        "identification by default. Reconstruction, export, provenance and the "
+        "operator dossier are unchanged — what is gated is the promotion of "
+        "geometry to evidence (profile attributes and the render-based "
+        "shortlist verifier). Re-enable per deployment, with numbers, via "
+        "`--3d-identification` / `EYES_ENABLE_3D_IDENTIFICATION=1`. A feature "
+        "that measures as harmful should be off, not documented as a caveat "
+        "and left running.",
+        "",
     ])
 
 

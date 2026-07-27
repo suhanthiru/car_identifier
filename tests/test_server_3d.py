@@ -128,13 +128,28 @@ def test_fusion_does_not_block_the_ingest_response(client):
     assert "profile_update" in resp.json()["events"]
 
 
-def test_render_verifier_is_wired_when_3d_enabled(tmp_path):
+def test_render_verifier_stays_out_of_the_cascade_by_default(tmp_path):
+    """Showing a reconstruction and letting it vote on identity are different
+    claims. The measured ablation (scripts/ablate_3d_cityflow.py) found the
+    geometry channel vetoing correct matches and no incorrect ones, so the 3D
+    panel is on with `enable_3d` while its identification path needs the
+    separate opt-in."""
+    app = create_app(db_url=f"sqlite:///{tmp_path}/w.sqlite",
+                     crops_dir=str(tmp_path / "crops"),
+                     targets3d_dir=str(tmp_path / "t3d"), enable_3d=True)
+    with TestClient(app):
+        assert app.state.enable_3d is True
+        assert app.state.tracker._cascade_config.shortlist_verifier is None
+
+
+def test_render_verifier_is_wired_when_3d_identification_enabled(tmp_path):
     """reasoning/ declares the shortlist_verifier hook but never imports
     car3d; the server is the only place the two can be joined. Before this
     wiring the verifier was built, tested, and unreachable in production."""
     app = create_app(db_url=f"sqlite:///{tmp_path}/w.sqlite",
                      crops_dir=str(tmp_path / "crops"),
-                     targets3d_dir=str(tmp_path / "t3d"), enable_3d=True)
+                     targets3d_dir=str(tmp_path / "t3d"), enable_3d=True,
+                     enable_3d_identification=True)
     with TestClient(app):
         verifier = app.state.tracker._cascade_config.shortlist_verifier
         assert verifier is not None

@@ -318,6 +318,11 @@ def main() -> None:
     parser.add_argument("--no-browser", action="store_true")
     parser.add_argument("--no-3d", action="store_true",
                         help="skip the 3D panel even if cargen is installed")
+    parser.add_argument("--3d-identification", dest="three_d_identification",
+                        action="store_true",
+                        help="let 3D geometry vote on identity (OFF by default: "
+                             "the measured ablation found it vetoes correct "
+                             "matches — see RESULTS.md)")
     parser.add_argument("--check", action="store_true",
                         help="report the environment and exit, installing nothing")
     parser.add_argument("--setup", action="store_true",
@@ -355,8 +360,16 @@ def main() -> None:
     # that you see everything the machine can actually do.
     enable_3d = cargen[0] and not args.no_3d
     os.environ["EYES_ENABLE_3D"] = "1" if enable_3d else "0"
+    # Visual by default, evidential only on request — the ablation measured the
+    # geometry channel removing correct matches and no incorrect ones.
+    os.environ["EYES_ENABLE_3D_IDENTIFICATION"] = (
+        "1" if (enable_3d and args.three_d_identification) else "0")
     if not enable_3d and cargen[0]:
         cargen = (True, "installed, disabled via --no-3d")
+    elif enable_3d:
+        cargen = (cargen[0], cargen[1] + (
+            "; feeding identification (--3d-identification)"
+            if args.three_d_identification else "; visual only"))
 
     time_scale = args.time_scale
     if time_scale is None:
