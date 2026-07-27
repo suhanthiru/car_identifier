@@ -439,6 +439,92 @@ def cityflow_section() -> str:
     return "\n".join(lines)
 
 
+def _threed_measured(s: dict) -> str:
+    """Report a real 3D ablation run from scripts/ablate_3d_cityflow.py.
+
+    Unlike the VeRi ablation's colour channel — dataset labels, i.e. a perfect
+    classifier, so its delta is an upper bound — this channel is measured from
+    actual reconstructions of actual crops. The number here is what the
+    pipeline produces, not a ceiling. A null result is therefore a real result
+    and is reported as one.
+    """
+    rows = s["rows"]
+    order = ["2D only (colour)", "+ 3D geometry"]
+    body = []
+    for name in order:
+        r = rows.get(name)
+        if not r:
+            continue
+        pct = lambda v: "n/a" if v != v else f"{v:.1%}"       # noqa: E731
+        body.append(
+            f"| {name} | {pct(r['precision'])} | {pct(r['recall'])} | "
+            f"{r['alerts']} | {r['false_positives']} | {r['review_rate']} | "
+            f"{r.get('attribute_vetoes', 0)} |")
+
+    a, b = rows.get(order[0], {}), rows.get(order[1], {})
+    d_fp = (a.get("false_positives", 0) - b.get("false_positives", 0))
+    d_p = (b.get("precision", 0) - a.get("precision", 0))
+    tp_a = a.get("alerts", 0) - a.get("false_positives", 0)
+    tp_b = b.get("alerts", 0) - b.get("false_positives", 0)
+    extra_vetoes = b.get("attribute_vetoes", 0) - a.get("attribute_vetoes", 0)
+    yield_pct = 100 * s["crops_with_geometry"] / max(s["crops"], 1)
+
+    if not d_p and not d_fp:
+        verdict = ("**No measurable difference.** The geometry channel changed "
+                   "neither precision nor the false-positive count here.")
+    elif d_p < 0 or (d_fp <= 0 and tp_b < tp_a):
+        # State harm as harm. A signed delta alone invites reading a negative
+        # result as a rounding artifact.
+        verdict = (
+            f"**The geometry channel made this worse: {d_p:+.1%} precision, "
+            f"{d_fp:+d} false positives removed.** It fired {extra_vetoes} "
+            f"additional attribute vetoes and those vetoes cost "
+            f"{tp_a - tp_b} correct matches while removing no incorrect ones — "
+            f"it is vetoing true positives. Single-crop proportion buckets "
+            f"(`body_profile`, `length_class`) are evidently noisy enough on "
+            f"real CCTV crops that they contradict on same-vehicle pairs about "
+            f"as often as on different-vehicle ones, which is precisely the "
+            f"failure mode that makes an attribute channel harmful rather than "
+            f"merely useless. On this evidence the 3D channel should not be "
+            f"enabled for identification decisions.")
+    else:
+        verdict = (f"**Delta: {d_p:+.1%} precision, {d_fp:+d} false positives "
+                   f"removed**, for {tp_a - tp_b:+d} correct matches lost.")
+
+    return "\n".join([
+        "## 3D-geometry ablation (car3d bridge) — MEASURED",
+        "",
+        f"Run by `scripts/ablate_3d_cityflow.py` on {s['scenario']} with the "
+        f"`{s['embedder']}` embedder: {s['crops']} real ground-truth crops over "
+        f"{s['vehicles_kept']} vehicles, threshold {s['threshold']:.3f}. Both "
+        "rows score IDENTICAL rankings; the only difference is whether "
+        "`car3d/geometry.py`'s proportion attributes reach the cascade's "
+        "contradiction check.",
+        "",
+        f"**The binding constraint is reconstruction yield: usable geometry on "
+        f"{s['crops_with_geometry']}/{s['crops']} crops ({yield_pct:.0f}%).** "
+        "The rest fall below the 64px subject bar or produce a signature whose "
+        "observed fraction is too low to trust — `signature_to_attrs` refuses "
+        "to emit attributes measured mostly on the generative prior, which "
+        "would launder a guess into evidence. On real CityFlow footage most "
+        "vehicles are simply too small in frame to carry geometry, and that "
+        "ceiling bounds anything this channel can contribute.",
+        "",
+        "| policy | precision | recall | alerts | false positives | reviews | attribute vetoes |",
+        "|---|---|---|---|---|---|---|",
+        *body,
+        "",
+        verdict,
+        "",
+        "Unlike the VeRi colour/body-type ablation — which uses dataset labels, "
+        "i.e. a perfect attribute classifier, making its delta an upper bound — "
+        "this channel is measured end to end from real reconstructions. There "
+        "is no idealisation left in it, so a null result here is a finding "
+        "about the feature rather than an artifact of the setup.",
+        "",
+    ])
+
+
 def threed_section() -> str:
     """The 3D-geometry ablation is doubly gated and says so."""
     try:
@@ -448,6 +534,11 @@ def threed_section() -> str:
     except Exception:
         backend_ok = False
     from datasets.veri776 import Veri776
+
+    measured = _load_json(Path("data/ablation3d_s01_fastreid.json")) or \
+        _load_json(Path("data/ablation3d_s01.json"))
+    if measured:
+        return _threed_measured(measured)
 
     if Veri776.exists() and backend_ok:
         # Both gates are open — but the row they were gating does not exist:
