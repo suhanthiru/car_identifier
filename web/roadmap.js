@@ -97,6 +97,9 @@ const REAL_TILE_ATTRIBUTION =
  */
 function renderRoadMap(map, cameras, adjacency, source) {
   const isReal = source === "real";
+  // camera pair -> the polyline to light when a hop is confirmed. Keyed both
+  // ways because a hop is directional and the drawn edge is not.
+  const edgeLines = {};
   if (isReal) {
     L.tileLayer(REAL_TILE_URL, {
       attribution: REAL_TILE_ATTRIBUTION, maxZoom: 20, subdomains: "abcd",
@@ -105,6 +108,28 @@ function renderRoadMap(map, cameras, adjacency, source) {
     // synthetic mode wants; real tiles legally require attribution, so add
     // it back here rather than asking every caller to remember.
     L.control.attribution({ prefix: false, position: "bottomright" }).addTo(map);
+    // Observed transit routes between real cameras. Deliberately NOT drawn or
+    // named as streets: a real basemap already shows the actual roads, and
+    // painting our own over it — or labelling these with invented street names
+    // the way synthetic mode does — would present fiction as fact. These are
+    // straight connectors standing for "a ground-truth vehicle was observed
+    // making this hop", which is exactly what to_road_graph() built them from.
+    const byIdReal = {};
+    cameras.forEach((c) => { byIdReal[c.camera_id] = c; });
+    const seenReal = new Set();
+    (adjacency || []).forEach((e) => {
+      const key = [e.src, e.dst].sort().join("|");
+      if (seenReal.has(key)) return;
+      seenReal.add(key);
+      const a = byIdReal[e.src], b = byIdReal[e.dst];
+      if (!a || !b) return;
+      const line = L.polyline([[a.lat, a.lon], [b.lat, b.lon]], {
+        color: "#3d5271", weight: 1.5, opacity: 0.5, dashArray: "3 6",
+        interactive: false,
+      }).addTo(map);
+      edgeLines[`${e.src}->${e.dst}`] = line;
+      edgeLines[`${e.dst}->${e.src}`] = line;
+    });
   } else {
     const byId = {};
     cameras.forEach((c) => { byId[c.camera_id] = c; });
@@ -120,10 +145,14 @@ function renderRoadMap(map, cameras, adjacency, source) {
         color: ROAD_ASPHALT, weight: 7, opacity: 1, interactive: false,
         lineCap: "round", lineJoin: "round",
       }).addTo(map);
-      L.polyline(path, {
+      // The centreline is the one that gets lit when a hop is confirmed, so
+      // it is the one worth keeping a handle on.
+      const centre = L.polyline(path, {
         color: ROAD_CENTERLINE, weight: 1.5, opacity: 0.85, dashArray: "6 8",
         interactive: false, lineCap: "round",
       }).addTo(map);
+      edgeLines[`${e.src}->${e.dst}`] = centre;
+      edgeLines[`${e.dst}->${e.src}`] = centre;
       L.tooltip({
         permanent: true, direction: "center", className: "street-label", interactive: false,
       }).setLatLng(path[1]).setContent(edgeStreetName(e.src, e.dst)).addTo(map);
@@ -142,5 +171,6 @@ function renderRoadMap(map, cameras, adjacency, source) {
     });
   });
 
-  return { cameraMarkers, isReal };
+  window.roadEdgeLines = edgeLines;
+  return { cameraMarkers, isReal, edgeLines };
 }

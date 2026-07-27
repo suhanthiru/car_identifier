@@ -23,7 +23,14 @@
     <div class="tb-sub" id="tb-subtitle">RESEARCH CONSOLE</div>
   </div>
   <div class="tb-right">
+    <div class="tb-clock" title="Footage time, not wall time — the same clock every timestamp in this console uses.">
+      <span id="tb-clock" class="mono">t+0s</span>
+      <span id="tb-clock-total" class="mono dim">/ —</span>
+      <span id="tb-speed" class="pill">—</span>
+    </div>
+    <div id="tb-progress"><div id="tb-progress-fill"></div></div>
     <button id="feed-toggle" class="tb-btn" title="Freeze the replay clock. Sightings already in the queue stay workable.">⏸ PAUSE</button>
+    <button id="feed-restart" class="tb-btn" title="Replay from t=0. Clears targets, reviews, alerts, crops and 3D models — a rewound clock beside conclusions earned from the last pass would be a lie.">⟲ RESTART</button>
     <div class="tb-sep"></div>
     <div class="tb-stat"><span class="tb-dot tb-dot-green"></span><span id="tb-cameras">— cameras</span></div>
     <div class="tb-sep"></div>
@@ -31,15 +38,57 @@
   </div>
 </div>
 
+<!-- Scale strip: what this dataset actually contains, and how much of it has
+     gone past. Static facts on the left, live tallies on the right. -->
+<div id="scale-strip" class="hidden">
+  <span class="ss-group" id="ss-scale"></span>
+  <span class="ss-spacer"></span>
+  <span class="ss-group" id="ss-live"></span>
+</div>
+
 <div id="pipeline-strip" class="hidden"></div>
 
 <div id="main-grid">
 
+  <!-- Map and timeline share grid column 1: the timeline is a second view of
+       the same footage, and as a bare 4th child it would steal the queue's
+       column. -->
+  <div id="map-column">
   <div id="map-panel" class="panel">
     <div class="panel-head">
       <span>LIVE MAP</span>
+      <span id="map-hint" class="panel-hint">click a camera for its live view</span>
     </div>
     <div id="map"></div>
+    <!-- Both overlays cover the map rather than opening elsewhere: the map is
+         the biggest surface on screen, and footage deserves it. -->
+    <div id="camera-view" class="map-overlay hidden">
+      <div class="mo-head">
+        <span id="cv-title" class="mono">—</span>
+        <span id="cv-sub" class="dim"></span>
+        <button class="mo-close" data-close="camera-view">✕</button>
+      </div>
+      <img id="cv-frame" alt="live camera view">
+      <div id="cv-note" class="mo-note"></div>
+    </div>
+    <div id="clip-view" class="map-overlay hidden">
+      <div class="mo-head">
+        <span id="clip-title" class="mono">—</span>
+        <span id="clip-sub" class="dim"></span>
+        <button class="mo-close" data-close="clip-view">✕</button>
+      </div>
+      <img id="clip-frame" alt="recorded passage of the flagged vehicle">
+      <div id="clip-note" class="mo-note"></div>
+    </div>
+  </div>
+
+  <div id="timeline-panel" class="panel hidden">
+    <div class="panel-head">
+      <span>CAMERA TIMELINE</span>
+      <span class="panel-hint" id="tl-hint">each mark is one vehicle passage</span>
+    </div>
+    <div id="timeline"></div>
+  </div>
   </div>
 
   <div id="queue-panel" class="panel">
@@ -57,6 +106,11 @@
     <div id="side-targets" class="panel-scroll">
       <section id="cityflow-vehicles-section" class="hidden">
         <div class="panel-subhead">BROWSE REAL VEHICLES <span id="cityflow-scenario-tag" class="pill"></span></div>
+        <label class="vt-filter" title="Flagging a car whose passage has already gone by leaves nothing for the cascade to associate — the review queue stays empty and a working run looks broken. Every vehicle here is multi-camera already; timing is what actually matters.">
+          <input type="checkbox" id="cf-upcoming-only" checked>
+          still to come only
+          <span id="cf-vehicle-count" class="vt-count"></span>
+        </label>
         <div id="cityflow-vehicles" class="vehicle-grid"></div>
       </section>
       <section id="flag-section">

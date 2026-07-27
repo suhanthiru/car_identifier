@@ -84,6 +84,7 @@ class VideoFrameSource:
     def __init__(self, video_path: Path):
         self._path = video_path
         self._cap = None
+        self._pos: int | None = None      # last decoded frame, for frame_at
 
     def _capture(self):
         import cv2
@@ -95,12 +96,46 @@ class VideoFrameSource:
             self._cap = cap
         return self._cap
 
+    def frame_at(self, frame: int) -> np.ndarray | None:
+        """Whole frame `frame`, decoding forward when that is cheaper.
+
+        `cap.set(CAP_PROP_POS_FRAMES)` on an inter-frame-coded AVI forces a
+        seek to the preceding keyframe and re-decodes from there, which is
+        expensive enough that a naive frame server stutters. Live playback
+        almost always asks for a frame slightly AHEAD of the last one, so read
+        forward instead; fall back to seeking only for a jump backwards or a
+        skip long enough that reading would cost more.
+        """
+        import cv2
+
+        cap = self._capture()
+        current = getattr(self, "_pos", None)
+        ahead = current is not None and 0 <= frame - current <= self.SEEK_AHEAD_MAX
+        if not ahead:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, frame))
+            current = frame - 1
+        img = None
+        while current is None or current < frame:
+            ok, img = cap.read()
+            if not ok or img is None:
+                self._pos = None
+                return None
+            current = frame if current is None else current + 1
+        self._pos = frame
+        return img
+
+    # Reading this many frames forward beats paying for a keyframe seek.
+    SEEK_AHEAD_MAX = 60
+
     def crop(self, frame: int, bbox: tuple[int, int, int, int]) -> np.ndarray | None:
         import cv2
 
         cap = self._capture()
         cap.set(cv2.CAP_PROP_POS_FRAMES, frame)
         ok, img = cap.read()
+        # Keep frame_at's forward-read fast path honest: this just moved the
+        # decoder, and a stale position would make it read from the wrong place.
+        self._pos = frame if (ok and img is not None) else None
         if not ok or img is None:
             return None
         left, top, w, h = bbox
@@ -112,3 +147,4 @@ class VideoFrameSource:
         if self._cap is not None:
             self._cap.release()
             self._cap = None
+        self._pos = None

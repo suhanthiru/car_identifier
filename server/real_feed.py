@@ -101,7 +101,10 @@ def build_vehicle_index(
     import cv2
 
     cache = _index_cache_path(scenario.name)
-    key = f"{scenario.name}:{len(scenario.spans)}:{len(camera_dirs)}"
+    # v2: entries gained n_cameras/n_passages. Bumped so an existing cache from
+    # before that change is rebuilt rather than served without the fields the
+    # browse panel now filters on.
+    key = f"v2:{scenario.name}:{len(scenario.spans)}:{len(camera_dirs)}"
     if use_cache and cache.is_file():
         try:
             blob = json.loads(cache.read_text())
@@ -111,10 +114,19 @@ def build_vehicle_index(
             pass  # corrupt or truncated cache: rebuild rather than fail
 
     earliest: dict[int, object] = {}
+    # How many distinct cameras saw each vehicle. A single-camera vehicle can
+    # never produce a cross-camera match, so flagging one demonstrates nothing
+    # the system is for — the browse panel uses this to default to the vehicles
+    # that can actually exercise re-identification.
+    cameras_per_vehicle: dict[int, set[str]] = {}
+    passages_per_vehicle: dict[int, int] = {}
     for span in scenario.spans:
         cur = earliest.get(span.vehicle_id)
         if cur is None or span.enter_s < cur.enter_s:
             earliest[span.vehicle_id] = span
+        cameras_per_vehicle.setdefault(span.vehicle_id, set()).add(span.camera_id)
+        passages_per_vehicle[span.vehicle_id] = \
+            passages_per_vehicle.get(span.vehicle_id, 0) + 1
 
     sources: dict[str, VideoFrameSource] = {}
     out: list[dict] = []
@@ -158,6 +170,9 @@ def build_vehicle_index(
             "vehicle_id": vid, "first_camera": span.camera_id,
             "first_time_s": span.enter_s, "thumbnail_b64": thumb_b64,
             "gallery_b64": gallery_b64,
+            "n_cameras": len(cameras_per_vehicle.get(vid, ())),
+            "n_passages": passages_per_vehicle.get(vid, 0),
+            "cameras": sorted(cameras_per_vehicle.get(vid, ())),
         })
     for src in sources.values():
         src.close()

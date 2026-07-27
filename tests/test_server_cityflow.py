@@ -62,12 +62,32 @@ def test_vehicles_returns_real_shape_with_thumbnail(cityflow_client):
     assert len(vehicles) == 1
     v = vehicles[0]
     assert set(v.keys()) == {"vehicle_id", "first_camera", "first_time_s",
-                             "thumbnail_b64", "gallery_b64"}
+                             "thumbnail_b64", "gallery_b64",
+                             "n_cameras", "n_passages", "cameras"}
     assert v["vehicle_id"] == 7
     assert v["first_camera"] == "c001"
     assert v["thumbnail_b64"]
     # Reference-gallery seeds: >=1 real passage crop, thumbnail among them.
     assert v["gallery_b64"] and v["thumbnail_b64"] in v["gallery_b64"]
+    assert v["n_cameras"] == len(v["cameras"]) >= 1
+
+
+def test_vehicles_can_exclude_single_camera_vehicles(cityflow_client):
+    """`min_cameras=2` hides vehicles that cannot be re-identified.
+
+    A vehicle the ground truth only ever saw once has no second sighting to
+    associate, so flagging it leaves the review queue empty and makes a working
+    run look broken. The fixture's lone vehicle is single-camera, so the
+    filtered list must come back empty rather than fall back to everything.
+    """
+    unfiltered = cityflow_client.get("/api/cityflow/S01/vehicles").json()
+    filtered = cityflow_client.get(
+        "/api/cityflow/S01/vehicles?min_cameras=2").json()
+    assert len(unfiltered) == 1 and unfiltered[0]["n_cameras"] == 1
+    assert filtered == []
+    # min_cameras=1 is the unfiltered default, not a special case.
+    assert cityflow_client.get(
+        "/api/cityflow/S01/vehicles?min_cameras=1").json() == unfiltered
 
 
 def test_vehicles_404_for_a_different_scenario_name(cityflow_client):

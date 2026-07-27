@@ -101,10 +101,98 @@ async function initMap() {
   setBanner(worldSource.source);
   // Pause works in both worlds -- both feeds share server.feed.FeedClock.
   initFeedControl();
+  initClock();
+  initRestart();
   if (worldSource.source === "real") {
     initCityflowVehicleBrowser();
     initPipelineStrip();
+    initTimeline();
+    // Only real mode has footage behind a camera; in the synthetic world there
+    // is nothing to show and a dead click would imply there was.
+    Object.entries(cameraMarkers).forEach(([id, marker]) => {
+      marker.on("click", () => openCameraView(id));
+      marker.getElement && marker.getElement()?.classList.add("cam-clickable");
+    });
+    document.getElementById("map-hint")?.classList.remove("hidden");
+  } else {
+    document.getElementById("map-hint")?.classList.add("hidden");
   }
+  document.querySelectorAll(".mo-close").forEach((b) => {
+    b.onclick = () => closeOverlay(b.dataset.close);
+  });
+}
+
+/* ------------------------------------------------------- clock and scale */
+
+let latestStats = null;
+
+function fmtClock(t) {
+  const s = Math.max(0, Math.round(t));
+  return `t+${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
+}
+
+/** Poll the clock and tallies once a second.
+ *
+ * Polled rather than pushed: these update on a fixed cadence regardless of
+ * whether sightings are arriving, and the whole point is to show that time is
+ * passing even during a quiet stretch of footage. A push-only clock would
+ * freeze exactly when the operator most wants reassurance it hasn't.
+ */
+async function initClock() {
+  const tick = async () => {
+    const s = await api("/api/stats").catch(() => null);
+    if (!s) return;
+    latestStats = s;
+    document.getElementById("tb-clock").textContent = fmtClock(s.sim_now);
+    const total = s.footage_duration_s || 0;
+    document.getElementById("tb-clock-total").textContent =
+      total ? `/ ${fmtClock(total)}` : "";
+    const fill = document.getElementById("tb-progress-fill");
+    if (fill) fill.style.width = total ? `${Math.min(100, 100 * s.sim_now / total)}%` : "0%";
+    const speed = document.getElementById("tb-speed");
+    if (speed) {
+      speed.textContent = s.paused ? "PAUSED" : "PLAYING";
+      speed.classList.toggle("pill-paused", !!s.paused);
+    }
+    renderScaleStrip(s);
+  };
+  await tick();
+  setInterval(tick, 1000);
+}
+
+function renderScaleStrip(s) {
+  const strip = document.getElementById("scale-strip");
+  if (!strip || s.world_source !== "real") return;
+  strip.classList.remove("hidden");
+  const sc = s.scale || {}, c = s.counters || {};
+  const cell = (label, value, title) =>
+    `<span class="ss-cell" title="${escapeHtml(title || "")}">` +
+    `<b class="mono">${escapeHtml(String(value))}</b> ${escapeHtml(label)}</span>`;
+  document.getElementById("ss-scale").innerHTML =
+    `<span class="ss-title">${escapeHtml(s.scenario || "")} CONTAINS</span>` +
+    cell("vehicles", sc.ground_truth_vehicles, "distinct vehicles in the ground truth") +
+    cell("tracks", sc.ground_truth_tracks, "one per vehicle per camera it passed through") +
+    cell("cameras", sc.cameras, "") +
+    cell("transit routes", sc.transit_routes, "camera pairs with an observed hop");
+  document.getElementById("ss-live").innerHTML =
+    `<span class="ss-title">SO FAR</span>` +
+    cell("sightings", c.sightings, "reported by the edge tier") +
+    cell("vehicles seen", c.vehicles_seen, "distinct ground-truth vehicles observed") +
+    cell("cross-camera hops", c.cross_camera_hops, "the same vehicle appearing at a new camera") +
+    cell("reviews", c.reviews_raised, "sent to a human rather than asserted") +
+    cell("refusals", c.refusals, "narrowed to a set and declined to name an individual");
+}
+
+async function initRestart() {
+  const btn = document.getElementById("feed-restart");
+  if (!btn) return;
+  btn.onclick = async () => {
+    if (!confirm("Replay from t=0?\n\nThis clears targets, reviews, alerts, "
+                 + "crops and 3D models from this run.")) return;
+    btn.disabled = true;
+    btn.textContent = "⟲ RESTARTING";
+    await api("/api/reset", { method: "POST" }).catch(() => null);
+  };
 }
 
 async function initFeedControl() {
@@ -153,11 +241,44 @@ async function initCityflowVehicleBrowser() {
   const scenarios = await api("/api/cityflow/scenarios").catch(() => []);
   if (!scenarios.length) return;
   const scenario = scenarios[0];
-  const vehicles = await api(`/api/cityflow/${scenario}/vehicles`).catch(() => []);
-  if (!vehicles.length) return;
+  const all = await api(`/api/cityflow/${scenario}/vehicles`).catch(() => []);
+  if (!all.length) return;
   document.getElementById("cityflow-scenario-tag").textContent = scenario;
   document.getElementById("flag-section").classList.add("hidden");
   section.classList.remove("hidden");
+
+  // Filter on TIME, not on camera count.
+  //
+  // The obvious filter — "seen at 2+ cameras" — is a no-op on this dataset:
+  // AIC22 Track 1 is a multi-camera benchmark, so its ground truth annotates
+  // only vehicles that cross more than one camera. All 95 of S01's vehicles
+  // qualify, as do 100% in every other scenario.
+  //
+  // What actually wastes an operator's time is flagging a car whose passage
+  // has already gone by: there is no future sighting left to associate, so the
+  // review queue stays empty and a working system looks broken. That is a
+  // function of the clock, so the list is re-filtered as it advances.
+  const toggle = document.getElementById("cf-upcoming-only");
+  const render = () => {
+    const now = latestStats ? latestStats.sim_now : 0;
+    const upcomingOnly = !toggle || toggle.checked;
+    const shown = all.filter(
+      (v) => !upcomingOnly || (v.first_time_s || 0) >= now - 2);
+    const count = document.getElementById("cf-vehicle-count");
+    if (count) {
+      count.textContent = upcomingOnly
+        ? `${shown.length} of ${all.length} still to come`
+        : `all ${all.length} vehicles`;
+    }
+    renderVehicleTiles(shown);
+  };
+  if (toggle) toggle.onchange = render;
+  render();
+  // Cheap enough to redo on the clock's cadence; keeps "still to come" true.
+  setInterval(render, 3000);
+}
+
+function renderVehicleTiles(vehicles) {
   const grid = document.getElementById("cityflow-vehicles");
   grid.innerHTML = "";
   vehicles.forEach((v) => {
@@ -166,7 +287,14 @@ async function initCityflowVehicleBrowser() {
     const img = v.thumbnail_b64
       ? `<img src="data:image/png;base64,${v.thumbnail_b64}" alt="vehicle ${v.vehicle_id}">`
       : `<div class="no-crop">no thumbnail</div>`;
-    tile.innerHTML = `${img}<div class="vt-label">#${escapeHtml(String(v.vehicle_id))} · ${escapeHtml(v.first_camera)} · t+${Math.round(v.first_time_s)}s</div>`;
+    const cams = v.n_cameras || 1;
+    // Shown as information, not as a filter: every annotated vehicle in this
+    // dataset is multi-camera, and in S01 54 of 95 appear at ALL FIVE cameras
+    // at once. The count is worth seeing because that overlap is surprising —
+    // it is also why the transit windows collapse to their floor.
+    const badge = `<span class="vt-cams${cams >= 2 ? "" : " vt-cams-single"}" `
+      + `title="${escapeHtml((v.cameras || []).join(', '))}">${cams} cam${cams === 1 ? "" : "s"}</span>`;
+    tile.innerHTML = `${img}<div class="vt-label">#${escapeHtml(String(v.vehicle_id))} · ${escapeHtml(v.first_camera)} · t+${Math.round(v.first_time_s)}s ${badge}</div>`;
     tile.onclick = () => flagCityflowVehicle(v);
     grid.appendChild(tile);
   });
@@ -186,6 +314,147 @@ async function flagCityflowVehicle(v) {
       reference_gallery_b64: v.gallery_b64 || [],
     }),
   });
+}
+
+/* ------------------------------------------------- camera view / timeline */
+
+let cameraViewTimer = null;
+
+/** Live view of one camera, refreshed against the replay clock.
+ *
+ * ~4 fps rather than the footage's 10: the frames are served by decoding the
+ * AVI on demand, and the operator is reading a scene, not counting frames.
+ * Deliberately shows NO detection boxes — see README/RESULTS on why drawing
+ * ground-truth boxes here would flatter the system with the dataset's own
+ * answer key.
+ */
+function openCameraView(cameraId) {
+  closeOverlay("clip-view");
+  const box = document.getElementById("camera-view");
+  const img = document.getElementById("cv-frame");
+  document.getElementById("cv-title").textContent = cameraId;
+  document.getElementById("cv-sub").textContent = "live view";
+  document.getElementById("cv-note").textContent =
+    "Real footage at this camera, following the replay clock. No boxes drawn: "
+    + "the dataset's ground truth would mark every vehicle perfectly and say "
+    + "nothing about what the system concluded.";
+  box.classList.remove("hidden");
+  const note = document.getElementById("cv-note");
+  const baseNote = note.textContent;
+  // Cameras in a scenario neither start together nor run equally long — the
+  // scenario timeline is the maximum across all of them — so near the end the
+  // clock outruns the shorter videos and the endpoint has no frame to serve.
+  // Say that, rather than leaving a broken image and letting it read as a
+  // failure of the system.
+  img.onerror = () => {
+    img.removeAttribute("src");
+    note.textContent = `No frame from ${cameraId} at this point in the replay — `
+      + "this camera's footage has ended. Other cameras may still be running; "
+      + "the scenario clock spans the longest of them.";
+  };
+  img.onload = () => { note.textContent = baseNote; };
+  const tick = () => {
+    const t = latestStats ? latestStats.sim_now : 0;
+    img.src = `/api/cityflow/camera/${encodeURIComponent(cameraId)}/frame.jpg?t=${t.toFixed(2)}`;
+  };
+  tick();
+  clearInterval(cameraViewTimer);
+  // ~2 fps. The endpoint costs ~70 ms alone (18.6 ms per decoded frame; resize
+  // and JPEG encode are ~2 ms together), but while the replay is decoding all
+  // five cameras it measures ~450 ms. Polling faster than the server can answer
+  // just queues requests, so the view would lag the clock instead of tracking
+  // it — and a live view that drifts behind is worse than one that steps.
+  cameraViewTimer = setInterval(tick, 500);
+}
+
+function closeOverlay(id) {
+  const el = document.getElementById(id);
+  if (el) el.classList.add("hidden");
+  if (id === "camera-view") { clearInterval(cameraViewTimer); cameraViewTimer = null; }
+  if (id === "clip-view") { clearInterval(clipViewTimer); clipViewTimer = null; }
+}
+
+let clipViewTimer = null;
+
+/** The flagged vehicle's own recorded passage, over the whole map.
+ *
+ * These are the crop frames the sighting already stored (`reference_clip`),
+ * so this is footage of the car as the system saw it — not a re-render, not
+ * the dataset's thumbnail.
+ */
+function openClipView(targetId, label, frames) {
+  if (!frames || !frames.length) return;
+  closeOverlay("camera-view");
+  const box = document.getElementById("clip-view");
+  const img = document.getElementById("clip-frame");
+  document.getElementById("clip-title").textContent = label || targetId;
+  document.getElementById("clip-sub").textContent =
+    `${frames.length} frame${frames.length === 1 ? "" : "s"} from the associated passage`;
+  document.getElementById("clip-note").textContent =
+    "The sighting the tracker associated to this target, as recorded.";
+  box.classList.remove("hidden");
+  let i = 0;
+  const tick = () => { img.src = frames[i % frames.length]; i += 1; };
+  tick();
+  clearInterval(clipViewTimer);
+  clipViewTimer = setInterval(tick, CLIP_FRAME_MS);
+}
+
+async function initTimeline() {
+  const scenarios = await api("/api/cityflow/scenarios").catch(() => []);
+  if (!scenarios.length) return;
+  const tl = await api(`/api/cityflow/${scenarios[0]}/timeline`).catch(() => null);
+  if (!tl || !tl.duration_s) return;
+  const panel = document.getElementById("timeline-panel");
+  panel.classList.remove("hidden");
+  const host = document.getElementById("timeline");
+  host.innerHTML = "";
+  tl.cameras.forEach((cam) => {
+    const lane = document.createElement("div");
+    lane.className = "tl-lane";
+    const marks = (tl.lanes[cam] || []).map((p) => {
+      const left = 100 * p.enter_s / tl.duration_s;
+      const width = Math.max(0.35, 100 * (p.exit_s - p.enter_s) / tl.duration_s);
+      return `<i class="tl-mark" style="left:${left.toFixed(3)}%;width:${width.toFixed(3)}%" `
+           + `title="vehicle ${p.vehicle_id}: ${Math.round(p.enter_s)}-${Math.round(p.exit_s)}s"></i>`;
+    }).join("");
+    lane.innerHTML = `<span class="tl-cam mono">${escapeHtml(cam)}</span>`
+                   + `<span class="tl-track">${marks}<i class="tl-playhead"></i></span>`;
+    lane.querySelector(".tl-track").onclick = () => openCameraView(cam);
+    host.appendChild(lane);
+  });
+  // One playhead per lane, inside the track. A single playhead over the whole
+  // panel needs its offset expressed against the lane label's fixed width,
+  // which cannot be written as a valid calc() (it ends up multiplying a
+  // percentage by a percentage). Inside the track, `left: %` is exact.
+  const heads = host.querySelectorAll(".tl-playhead");
+  setInterval(() => {
+    if (!latestStats) return;
+    const pct = 100 * Math.min(1, latestStats.sim_now / tl.duration_s);
+    heads.forEach((h) => { h.style.left = `${pct.toFixed(2)}%`; });
+  }, 500);
+}
+
+/** Draw the cross-camera hop a vehicle just made, then fade it.
+ *
+ * A transient line between the two camera positions rather than a highlight on
+ * a drawn road: in real mode no road network is drawn at all (the basemap has
+ * the real streets, and overlaying our own would be fiction on top of fact), so
+ * there is no edge to light. This claims only what it shows — the same vehicle
+ * appeared at these two cameras, in this order.
+ */
+function flashHop(msg) {
+  const a = cameraMarkers[msg.from_camera], b = cameraMarkers[msg.to_camera];
+  if (!a || !b) return;
+  const line = L.polyline([a.getLatLng(), b.getLatLng()], {
+    color: "#8ee0a8", weight: 2, opacity: 0.9, dashArray: "5 5", interactive: false,
+  }).addTo(map);
+  let opacity = 0.9;
+  const fade = setInterval(() => {
+    opacity -= 0.07;
+    if (opacity <= 0) { clearInterval(fade); map.removeLayer(line); return; }
+    line.setStyle({ opacity });
+  }, 60);
 }
 
 function flashContact(msg) {
@@ -532,11 +801,17 @@ async function openDossier(targetId) {
     : `<div class="dossier-recon-empty">3D model not reconstructed yet.
         <span style="color:var(--dim)">Enable <code>EYES_ENABLE_3D</code> and confirm sightings to
         build one from fused observations.</span></div>`;
+  // The clip is 150px wide in this panel and is the most informative thing in
+  // the dossier — it is the actual footage of the car. Offer it full size over
+  // the map, which is the only surface big enough to be worth looking at.
+  const canMaximize = (d.reference_clip || []).length > 0;
   const dossierTop = `
     <div class="dossier-top">
       <div class="dossier-toggle">
         <button class="dossier-tab active" data-pane="clip">Targeting clip</button>
         <button class="dossier-tab" data-pane="model3d">3D model</button>
+        ${canMaximize ? `<button class="dossier-maximize" id="clip-maximize"
+            title="Play this passage full size over the map">⤢ enlarge</button>` : ""}
       </div>
       <div class="dossier-pane" data-pane="clip">${clipPane}</div>
       <div class="dossier-pane hidden" data-pane="model3d">${model3dPane}</div>
@@ -584,6 +859,11 @@ async function openDossier(targetId) {
     };
   });
   attachClipPlayers(dossierEl);
+  const maximize = document.getElementById("clip-maximize");
+  if (maximize) {
+    maximize.onclick = () => openClipView(
+      d.target_id, d.label || d.target_id, d.reference_clip);
+  }
   showDossierView();
 }
 
@@ -623,6 +903,17 @@ function connect() {
       if (openDossierId && latestSnapshot[openDossierId]) openDossier(openDossierId);
     } else if (msg.type === "contact") {
       flashContact(msg);
+    } else if (msg.type === "hop") {
+      flashHop(msg);
+    } else if (msg.type === "resetting") {
+      // Clear immediately rather than waiting for the rewind to land: the
+      // panels still hold the previous pass's targets and reviews, and leaving
+      // them on screen beside a clock about to jump back to zero is the exact
+      // past-footage-next-to-present-conclusions confusion the reset exists to
+      // avoid.
+      onResetting();
+    } else if (msg.type === "reset_done") {
+      onResetDone();
     } else {
       pushAlert(msg);
       if (["review", "anomaly", "association", "rejection"].includes(msg.type)) {
@@ -634,6 +925,36 @@ function connect() {
   ws.onclose = () => setTimeout(connect, 1500);
 }
 
+/* ----------------------------------------------------------------- reset */
+
+function onResetting() {
+  ["camera-view", "clip-view"].forEach(closeOverlay);
+  latestSnapshot = {};
+  openDossierId = "";
+  showTargetsView();
+  renderTargetsOnMap({});
+  renderTargetList({});
+  ["reviews", "targets", "audit"].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.innerHTML = "";
+  });
+  const btn = document.getElementById("feed-restart");
+  if (btn) { btn.disabled = true; btn.textContent = "⟲ RESTARTING"; }
+}
+
+function onResetDone() {
+  const btn = document.getElementById("feed-restart");
+  if (btn) { btn.disabled = false; btn.textContent = "⟲ RESTART"; }
+  refreshReviews();
+  refreshAudit();
+  // The vehicle browser is keyed to the clock (it hides passages already gone
+  // by), so it has to be rebuilt against the rewound timeline.
+  initCityflowVehicleBrowser();
+}
+
+// initMap owns the clock, restart and timeline init: the timeline only exists
+// in real mode and it already knows which mode this is. Calling them here too
+// would double every poll interval.
 initMap().then(() => {
   connect();
   refreshReviews();

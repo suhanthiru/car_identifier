@@ -71,7 +71,14 @@ body {
 #main-grid {
   flex: 1; display: grid; grid-template-columns: 1fr 300px 320px; min-height: 0;
 }
+/* Map and timeline stack inside grid column 1. Without this the timeline is a
+   bare 4th grid child and lands in the review queue's column. */
+#map-column { display: flex; flex-direction: column; min-width: 0; overflow: hidden; }
+#map-column #map-panel { flex: 1; min-height: 0; }
 .panel { border-right: 1px solid var(--line); display: flex; flex-direction: column; min-width: 0; overflow: hidden; }
+/* A camera you can click should say so before you click it. */
+.cam-clickable { cursor: pointer; }
+.leaflet-interactive { cursor: pointer; }
 #side-panel { border-right: none; }
 .panel-head {
   height: 34px; flex: none; display: flex; align-items: center; justify-content: space-between;
@@ -128,6 +135,19 @@ body {
 .vehicle-tile .vt-label {
   font-family: Consolas, monospace; font-size: 9px; color: var(--dim); padding: 2px;
 }
+/* Camera count says whether this vehicle can exercise re-identification at
+   all, so it is the one thing on the tile allowed to be brighter than the id. */
+.vt-cams {
+  display: inline-block; margin-left: 2px; padding: 0 3px; border-radius: 2px;
+  background: #14301f; color: #8ee0a8;
+}
+.vt-cams-single { background: #2a1e12; color: #d0a06a; }
+.vt-filter {
+  display: flex; align-items: center; gap: 5px; cursor: pointer;
+  font-size: 10px; color: var(--dim); margin: 0 0 6px;
+}
+.vt-filter input { margin: 0; cursor: pointer; }
+.vt-count { margin-left: auto; font-family: Consolas, monospace; opacity: .8; }
 
 #flag-form { display: flex; flex-direction: column; gap: 6px; }
 #flag-form input, #flag-form select {
@@ -390,3 +410,109 @@ table.dossier-table th { color: var(--dim); font-weight: 600; }
 .tl-r { background: #5a2a2a; }
 .tl-y { background: #5a4a1a; }
 .tl-g { background: #1a4a2a; }
+
+/* ----------------------------------------------------- clock and progress */
+/* Footage time, not wall time. Every other timestamp in this console is in
+   footage seconds, so a wall clock here would disagree with all of them the
+   moment anyone pauses. */
+.tb-clock { display: flex; align-items: center; gap: 6px; font-size: 11px; }
+#tb-clock { color: var(--text); font-size: 12px; }
+#tb-clock-total { color: var(--dim); }
+.dim { color: var(--dim); }
+.pill-paused { background: var(--tentative); }
+#tb-progress {
+  width: 90px; height: 3px; background: var(--line); border-radius: 2px;
+  overflow: hidden;
+}
+#tb-progress-fill {
+  height: 100%; width: 0; background: var(--accent); transition: width .9s linear;
+}
+
+/* --------------------------------------------------------- scale strip */
+/* Left: what the dataset contains. Right: what has actually been seen so far.
+   Keeping them adjacent is the point — a tally means little without the
+   denominator beside it. */
+#scale-strip {
+  flex: none; display: flex; align-items: center; gap: 10px;
+  padding: 4px 14px; border-bottom: 1px solid var(--line);
+  background: var(--panel); font-size: 10px; color: var(--dim);
+  overflow-x: auto; white-space: nowrap;
+}
+.ss-spacer { flex: 1; }
+.ss-group { display: inline-flex; align-items: center; gap: 10px; }
+.ss-title { letter-spacing: .08em; opacity: .7; }
+.ss-cell b { color: var(--text); font-size: 11px; }
+
+/* ------------------------------------------------- map overlays (video) */
+/* Both cover the map: it is the largest surface on screen and real footage
+   deserves it more than a decorative basemap does. */
+#map-panel { position: relative; }
+.panel-hint { font-size: 10px; color: var(--dim); font-weight: 400; letter-spacing: 0; }
+.map-overlay {
+  position: absolute; inset: 34px 0 0 0; z-index: 900;
+  background: #080b0f; display: flex; flex-direction: column;
+}
+.mo-head {
+  flex: none; display: flex; align-items: center; gap: 8px;
+  padding: 6px 12px; border-bottom: 1px solid var(--line);
+  font-size: 11px; background: var(--panel);
+}
+.mo-head .dim { margin-right: auto; }
+.mo-close {
+  background: transparent; border: 1px solid var(--line); color: var(--dim);
+  border-radius: 3px; cursor: pointer; font-size: 11px; padding: 2px 7px;
+}
+.mo-close:hover { color: var(--text); border-color: var(--dim); }
+.map-overlay img {
+  flex: 1; min-height: 0; width: 100%; object-fit: contain; background: #05070a;
+}
+.mo-note {
+  flex: none; padding: 5px 12px; font-size: 10px; color: var(--dim);
+  border-top: 1px solid var(--line); background: var(--panel);
+}
+
+/* ------------------------------------------------------ camera timeline */
+/* One lane per camera, one mark per passage. This is the only view that shows
+   the dataset's real structure: in S01 a single vehicle is often present in
+   all five lanes at once, which is why the transit windows collapse. */
+#timeline-panel { border-top: 1px solid var(--line); max-height: 170px; }
+#timeline { flex: 1; overflow-y: auto; padding: 6px 12px 10px; position: relative; }
+.tl-lane { display: flex; align-items: center; gap: 6px; height: 18px; }
+.tl-cam {
+  width: 40px; flex: none; font-family: Consolas, monospace; font-size: 9px;
+  color: var(--dim); text-align: right;
+}
+.tl-track {
+  flex: 1; position: relative; height: 10px; background: var(--panel-2);
+  border-radius: 2px; cursor: pointer;
+}
+.tl-track:hover { outline: 1px solid var(--line); }
+.tl-mark {
+  position: absolute; top: 2px; height: 6px; min-width: 2px;
+  background: var(--accent); opacity: .55; border-radius: 1px;
+}
+.tl-playhead {
+  position: absolute; top: -2px; bottom: -2px; width: 1px;
+  background: var(--tentative); pointer-events: none; z-index: 5;
+  transition: left .45s linear;
+}
+
+/* --------------------------------------------------- dossier maximize */
+.dossier-maximize {
+  margin-left: auto; background: transparent; border: 1px solid var(--line);
+  color: var(--dim); border-radius: 3px; cursor: pointer; font-size: 10px;
+  padding: 2px 6px;
+}
+.dossier-maximize:hover { color: var(--accent); border-color: var(--accent); }
+
+/* Map and timeline stack inside grid column 1 — the timeline is a second view
+   of the same footage, not a competitor for the review queue's column. */
+#map-column {
+  display: flex; flex-direction: column; min-width: 0; min-height: 0;
+  border-right: 1px solid var(--line);
+}
+#map-column #map-panel { flex: 1; min-height: 0; border-right: none; }
+#map-column #timeline-panel { flex: none; border-right: none; }
+/* Cameras are only clickable in real mode, where there is footage behind
+   them; a pointer cursor in the synthetic world would promise one. */
+.cam-clickable { cursor: pointer; }

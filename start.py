@@ -172,10 +172,11 @@ def run_synthetic(port: int, time_scale: float, open_browser: bool) -> None:
         webbrowser.open(base)
     print(f"\n  replaying the synthetic world at {time_scale}x - watch the console\n")
 
-    counts = asyncio.run(run_feed(
-        build_default_world(),
-        FeedConfig(base_url=base, time_scale=time_scale),
-        pipeline_state=app.state))
+    counts = asyncio.run(_supervise_feed(
+        app, lambda: run_feed(
+            build_default_world(),
+            FeedConfig(base_url=base, time_scale=time_scale),
+            pipeline_state=app.state)))
     _idle(server, sum(counts.values()), len(counts))
 
 
@@ -230,10 +231,52 @@ def run_cityflow(port: int, time_scale: float, open_browser: bool, scenario: str
     print(f"\n  replaying {scenario} at {time_scale}x - browse the thumbnails "
           f"and click any car to track it\n")
 
-    counts = asyncio.run(run_cityflow_feed(
-        scen, camera_dirs, scen.camera_gps(), app.state,
-        CityFlowFeedConfig(base_url=base, time_scale=time_scale)))
+    counts = asyncio.run(_supervise_feed(
+        app, lambda: run_cityflow_feed(
+            scen, camera_dirs, scen.camera_gps(), app.state,
+            CityFlowFeedConfig(base_url=base, time_scale=time_scale))))
     _idle(server, sum(counts.values()), len(counts))
+
+
+async def _supervise_feed(app, make_feed) -> dict:
+    """Run the replay, and rerun it from t=0 whenever a reset is requested.
+
+    POST /api/reset only sets a flag: the feed's camera tasks live in this
+    loop's event loop while the request is served on a uvicorn worker thread,
+    so tearing them down from the handler would cancel tasks mid-POST. Here we
+    own them, and can cancel, wipe and restart in a defined order.
+
+    Clearing is bundled with the rewind rather than offered separately. Rewound
+    footage beside targets and beliefs earned from the previous pass would show
+    a past frame next to present-tense conclusions — exactly what
+    /api/feed_control refuses to do by offering pause and not rewind.
+    """
+    state = app.state
+    while True:
+        task = asyncio.create_task(make_feed())
+        while not task.done():
+            if getattr(state, "restart_requested", False):
+                task.cancel()
+                break
+            await asyncio.sleep(0.2)
+        try:
+            counts = await task
+        except asyncio.CancelledError:
+            counts = {}
+        if not getattr(state, "restart_requested", False):
+            return counts
+        print("\n  reset requested - clearing this run and replaying from t=0\n")
+        # Let any in-flight 3D fusion finish before the directories go: the
+        # worker holds file handles under targets3d, and yanking them mid-write
+        # leaves a half-exported asset the next run would try to load.
+        executor = getattr(state, "car3d_executor", None)
+        if executor is not None:
+            await asyncio.get_running_loop().run_in_executor(
+                None, lambda: [j.cancel() for j in
+                               list(getattr(state, "car3d_jobs", {}).values())])
+        state.reset_runtime()
+        await state.manager.broadcast({"type": "reset_done",
+                                       "run_generation": state.run_generation})
 
 
 def _serve(app, port: int) -> "uvicorn.Server":

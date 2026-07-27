@@ -200,6 +200,23 @@ def create_app(
     # on one shared timeline and the cross-camera gaps the transit check
     # scores against survive the pause unchanged.
     state.feed_paused = False
+    # Live tallies for the console's scale strip. Kept as plain counters rather
+    # than derived from the DB per poll: the point is to show the replay moving
+    # once a second, and a COUNT(*) over the audit tables every second to draw a
+    # number is a silly amount of work for a display.
+    state.counters = {
+        "sightings": 0, "vehicles_seen": 0, "cross_camera_hops": 0,
+        "reviews_raised": 0, "refusals": 0, "alerts": 0,
+    }
+    state._seen_vehicle_keys: set[str] = set()
+    state._last_camera_by_vehicle: dict[str, str] = {}
+    # Set by POST /api/reset; start.py's supervisor watches it, tears the feed
+    # down, wipes runtime state and replays from t=0. Held on state because the
+    # feed and the server live in different threads and this is the only thing
+    # they need to agree on.
+    state.restart_requested = False
+    state.run_generation = 0
+    state.footage_duration_s = 0.0
     # Shared lazy embedder for photo-seeded flags (see _flag_embedder below);
     # tests may inject a stub here to avoid the model load.
     state.flag_embedder = None
@@ -686,6 +703,7 @@ def create_app(
                          {"event_id": obs.event_id, "camera_id": obs.camera_id,
                           "outcomes": [e.kind for e in events]}, obs.timestamp_s)
             session.commit()
+        _tally(obs, events)
         await state.manager.broadcast({
             "type": "contact", "event_id": obs.event_id,
             "camera_id": obs.camera_id, "timestamp_s": obs.timestamp_s,
@@ -693,11 +711,58 @@ def create_app(
             "class_attrs": dict(obs.class_attrs),
             "crop": f"/api/crops/{crop_name}" if crop_name else "",
             "detection_source": obs.detection_source})
+        for hop in _hops_from(obs):
+            # Lights the corresponding transit edge on the operator's map, so
+            # the road graph shows the physics reasoning happening rather than
+            # sitting there as decoration.
+            await state.manager.broadcast(hop)
         await _broadcast_events(events)
         await state.manager.broadcast({
             "type": "snapshot", "timestamp_s": state.sim_now,
             "targets": state.tracker.snapshot(state.sim_now)})
         return {"events": [e.kind for e in events]}
+
+    def _tally(obs, events) -> None:
+        """Update the live scale counters from one ingested sighting."""
+        c = state.counters
+        c["sightings"] += 1
+        # Ground-truth vehicle id when the dataset supplies one; otherwise the
+        # event id, which at least counts distinct sightings honestly rather
+        # than silently collapsing them.
+        key = str(obs.eval_truth_id or obs.event_id)
+        if key not in state._seen_vehicle_keys:
+            state._seen_vehicle_keys.add(key)
+            c["vehicles_seen"] = len(state._seen_vehicle_keys)
+        for ev in events:
+            if ev.kind == "review":
+                c["reviews_raised"] += 1
+            elif ev.kind == "alert":
+                c["alerts"] += 1
+            if ev.detail.get("refused_to_individuate"):
+                c["refusals"] += 1
+
+    def _hops_from(obs) -> list[dict]:
+        """Cross-camera transitions for this sighting's ground-truth vehicle.
+
+        Uses the dataset's own id, so this reports what the FOOTAGE did, not
+        what the cascade concluded — it is a display of the data's structure,
+        and the message says so via `source: "ground_truth"`. Drawing the
+        system's own associations here instead would be a different claim and
+        needs the association's previous camera, which the event does not
+        currently carry.
+        """
+        vid = getattr(obs, "eval_truth_id", None)
+        if vid is None:
+            return []
+        key = str(vid)
+        previous = state._last_camera_by_vehicle.get(key)
+        state._last_camera_by_vehicle[key] = obs.camera_id
+        if not previous or previous == obs.camera_id:
+            return []
+        state.counters["cross_camera_hops"] += 1
+        return [{"type": "hop", "from_camera": previous,
+                 "to_camera": obs.camera_id, "timestamp_s": obs.timestamp_s,
+                 "vehicle_id": key, "source": "ground_truth"}]
 
     # ------------------------------------------------------ reviews/alerts
 
@@ -851,6 +916,155 @@ def create_app(
             state.feed_paused = req.paused
         return {"paused": state.feed_paused}
 
+    def reset_runtime() -> None:
+        """Wipe everything the last pass produced. Called by the supervisor
+        between runs, never from a request handler — see POST /api/reset."""
+        import shutil
+
+        with state.tracker_lock:
+            state.tracker = FleetTracker(graph, cascade_config)
+        state.sim_now = 0.0
+        state.target_seq = itertools.count(1)
+        state.counters = {k: 0 for k in state.counters}
+        state._seen_vehicle_keys = set()
+        state._last_camera_by_vehicle = {}
+        state.car3d_jobs = {}
+        state.feed_paused = False
+        state.run_generation += 1
+        # Everything the run produced. CameraRow/AdjacencyRow are deliberately
+        # absent: they are the deployment's topology, not this pass's output,
+        # and dropping them would leave the map with nothing to draw.
+        with Session(engine) as session:
+            for model in (dbm.SightingRow, dbm.TargetRow, dbm.ProfileUpdateRow,
+                          dbm.CorroborationRow, dbm.ReviewRow, dbm.AlertRow,
+                          dbm.AuditRow):
+                for row in session.exec(select(model)).all():
+                    session.delete(row)
+            session.commit()
+        for directory in (state.crops_dir, state.targets3d_dir):
+            shutil.rmtree(directory, ignore_errors=True)
+            directory.mkdir(parents=True, exist_ok=True)
+        state.restart_requested = False
+
+    state.reset_runtime = reset_runtime
+
+    @app.get("/api/stats")
+    def stats():
+        """Clock + live tallies for the console's scale strip.
+
+        `sim_now` is footage time, not wall time: it is whatever the newest
+        ingested sighting carried, which is the only clock the reasoning layer
+        actually uses. Reporting wall time here would drift from every
+        timestamp shown elsewhere the moment anyone hits pause.
+        """
+        scen = state.cityflow_scenario
+        duration = state.footage_duration_s
+        if not duration and scen is not None:
+            duration = max((sp.exit_s for sp in scen.spans), default=0.0)
+            state.footage_duration_s = duration
+        return {
+            "sim_now": state.sim_now,
+            "footage_duration_s": duration,
+            "paused": state.feed_paused,
+            "world_source": state.world_source,
+            "run_generation": state.run_generation,
+            "scenario": scen.name if scen is not None else "",
+            "counters": dict(state.counters),
+            "scale": {
+                "cameras": len(graph.cameras),
+                "ground_truth_vehicles": (
+                    len({sp.vehicle_id for sp in scen.spans}) if scen else 0),
+                "ground_truth_tracks": len(scen.spans) if scen else 0,
+                "transit_routes": len(graph.edges),
+            },
+        }
+
+    @app.post("/api/reset")
+    async def reset_run():
+        """Restart the replay from t=0 and clear everything it produced.
+
+        Sets a flag rather than doing the work here: the feed runs in another
+        thread's event loop (start.py), and tearing it down from a request
+        handler would race the camera tasks mid-POST. The supervisor notices,
+        cancels the feed, wipes runtime state, and replays from the top.
+
+        Clearing is not optional and not a separate button. A rewound clock
+        beside targets, reviews and beliefs accumulated from the previous pass
+        would show past footage next to present-tense conclusions — the same
+        reason `/api/feed_control` offers pause but never rewind.
+        """
+        state.restart_requested = True
+        await state.manager.broadcast({"type": "resetting"})
+        return {"restarting": True, "run_generation": state.run_generation}
+
+    @app.get("/api/cityflow/camera/{camera_id}/frame.jpg")
+    def cityflow_camera_frame(camera_id: str, t: float | None = None):
+        """One JPEG of what this camera sees at footage time `t`.
+
+        Decoding is sequential-with-seek-fallback (see
+        cityflow_video.VideoFrameSource.frame_at): during normal playback the
+        requested frame is a little ahead of the last one, which is a few cheap
+        reads, and only a jump backwards or a long skip pays for a seek. Random
+        seeking every request is what makes naive frame servers unusable on
+        1080p AVI.
+        """
+        from fastapi.responses import Response
+
+        cam_dir = (state.cityflow_camera_dirs or {}).get(camera_id)
+        if cam_dir is None:
+            raise HTTPException(404, f"no such camera: {camera_id!r}")
+        import cv2
+
+        from datasets.cityflow import DEFAULT_FPS
+        from datasets.cityflow_video import VideoFrameSource
+
+        sources = getattr(state, "_frame_sources", None)
+        if sources is None:
+            sources = state._frame_sources = {}
+        src = sources.get(camera_id)
+        if src is None:
+            src = sources[camera_id] = VideoFrameSource(cam_dir / "vdo.avi")
+        at = state.sim_now if t is None else t
+        img = src.frame_at(int(max(0.0, at) * DEFAULT_FPS))
+        if img is None:
+            raise HTTPException(404, "no frame at that time")
+        # Downscale before encoding. Source frames are 1080p and encode to
+        # ~280 KB, which at a 4 fps refresh is both slower than the refresh
+        # interval and pointless: the overlay renders far smaller than this.
+        max_w = 960
+        if img.shape[1] > max_w:
+            scale = max_w / img.shape[1]
+            img = cv2.resize(img, (max_w, int(img.shape[0] * scale)),
+                             interpolation=cv2.INTER_AREA)
+        ok, jpg = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
+        if not ok:
+            raise HTTPException(500, "frame encode failed")
+        return Response(content=jpg.tobytes(), media_type="image/jpeg",
+                        headers={"Cache-Control": "no-store"})
+
+    @app.get("/api/cityflow/{scenario}/timeline")
+    def cityflow_timeline(scenario: str):
+        """Per-camera passage lanes: when each vehicle was in each view.
+
+        This is what makes the dataset's structure legible. In S01 a single
+        vehicle is frequently present in all five cameras at once, which no
+        other view in the console reveals and which is the reason the transit
+        windows collapse to their floor.
+        """
+        scen = state.cityflow_scenario
+        if scen is None or scenario != scen.name:
+            raise HTTPException(404, f"scenario {scenario!r} is not active")
+        lanes: dict[str, list[dict]] = {cam: [] for cam in scen.cameras}
+        for sp in scen.spans:
+            lanes.setdefault(sp.camera_id, []).append({
+                "vehicle_id": sp.vehicle_id,
+                "enter_s": round(sp.enter_s, 2), "exit_s": round(sp.exit_s, 2)})
+        duration = max((sp.exit_s for sp in scen.spans), default=0.0)
+        return {"scenario": scen.name, "duration_s": duration,
+                "cameras": list(scen.cameras),
+                "lanes": {c: sorted(v, key=lambda p: p["enter_s"])
+                          for c, v in lanes.items()}}
+
     @app.get("/api/cityflow/scenarios")
     def cityflow_scenarios():
         """Every scenario in the dataset this server was pointed at, not
@@ -863,7 +1077,15 @@ def create_app(
         return CityFlow(state.cityflow_root).scenario_names()
 
     @app.get("/api/cityflow/{scenario}/vehicles")
-    def cityflow_vehicles(scenario: str):
+    def cityflow_vehicles(scenario: str, min_cameras: int = 1):
+        """`min_cameras=2` restricts the browse list to vehicles the ground
+        truth actually saw at more than one camera.
+
+        Flagging a single-camera vehicle cannot demonstrate re-identification:
+        there is no second sighting for the cascade to associate, so the review
+        queue stays empty and the run looks broken when it is working exactly
+        as specified. Filtering server-side keeps the thumbnails out of the
+        response rather than hiding them after they are sent."""
         if state.cityflow_scenario is None or scenario != state.cityflow_scenario.name:
             raise HTTPException(
                 404, f"scenario {scenario!r} is not the active real-data scenario "
@@ -873,7 +1095,10 @@ def create_app(
 
             state.cityflow_vehicle_index = build_vehicle_index(
                 state.cityflow_scenario, state.cityflow_camera_dirs)
-        return state.cityflow_vehicle_index
+        if min_cameras <= 1:
+            return state.cityflow_vehicle_index
+        return [v for v in state.cityflow_vehicle_index
+                if v.get("n_cameras", 1) >= min_cameras]
 
     # ---------------------------------------------------------- inspector
 
