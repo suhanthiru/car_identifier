@@ -181,3 +181,15 @@ def test_model3d_traversal_blocked(client):
     client.post("/api/sightings", json=sighting("evt-1"))
     bad = client.get(f"/api/targets/{target_id}/model3d/..%2F..%2Fcloud.npz")
     assert bad.status_code == 404
+
+
+def test_model3d_404s_for_an_unknown_target(client):
+    """An id that was never flagged has no model state to report.
+
+    Regression: this answered 200 {"exists": false}, which is the identical
+    response to "flagged, nothing fused yet" — so a typo or a stale dossier
+    link presented as a live target with no reconstruction. /api/targets/{id}
+    already 404s; these now agree.
+    """
+    assert client.get("/api/targets/tgt-nope/model3d").status_code == 404
+    assert client.get("/api/targets/tgt-nope").status_code == 404

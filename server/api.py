@@ -567,7 +567,7 @@ def create_app(
             gallery=tuple(embedder.embed(c) for c in crops))
 
     @app.post("/api/targets", status_code=201)
-    def flag_target(req: FlagTargetRequest):
+    async def flag_target(req: FlagTargetRequest):
         target_id = f"tgt-{next(state.target_seq):03d}"
         profile = profile_from_flag(
             target_id, req.label, req.plate, req.class_attrs, req.instance_attrs)
@@ -597,6 +597,15 @@ def create_app(
                           "photo_seeded": bool(req.reference_crop_b64)},
                          state.sim_now)
             session.commit()
+        # Tell the console immediately. The targets list is painted from the
+        # snapshot broadcast, which was only ever sent on sighting ingest — so
+        # flagging while the feed was paused, or after the replay had finished,
+        # ticked the tile green and left the panel saying "no targets flagged
+        # yet" until a sighting happened to arrive. Flagging is the operator's
+        # single most important action; it must be visible the moment it lands.
+        await state.manager.broadcast({
+            "type": "snapshot", "timestamp_s": state.sim_now,
+            "targets": state.tracker.snapshot(state.sim_now)})
         return {"target_id": target_id}
 
     @app.get("/api/targets")
@@ -1386,6 +1395,14 @@ def create_app(
         or nothing has been fused yet — the UI hides the section then."""
         from car3d.geometry import signature_from_cloud
         from car3d.profile_model import Target3DModel
+
+        # An unknown target has no model state to report. Answering 200
+        # {"exists": false} for an id that does not exist is the same answer as
+        # "flagged, nothing fused yet", so a typo or a stale dossier link looked
+        # like a live target with no reconstruction. /api/targets/{id} already
+        # 404s; this now agrees with it.
+        if target_id not in state.tracker.targets():
+            raise HTTPException(404, "unknown target")
 
         # Settle any queued fusion first, so the dossier never reports a
         # target as having no model purely because the worker is mid-flight.

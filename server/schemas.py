@@ -7,11 +7,18 @@ as base64 PNG so the review UI can show them.
 """
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from typing import Annotated
+
+from pydantic import BaseModel, Field, StringConstraints
 
 
 class FlagTargetRequest(BaseModel):
-    label: str = Field(min_length=1, max_length=120)
+    # Stripped before the length check, so "   " is rejected rather than
+    # creating a target with no readable name. min_length=1 alone accepted
+    # whitespace, and the operator then had a row in the target list they
+    # could not identify or tell apart from another blank one.
+    label: Annotated[str, StringConstraints(strip_whitespace=True,
+                                            min_length=1, max_length=120)]
     plate: str = ""
     class_attrs: dict[str, str] = {}
     instance_attrs: dict[str, str] = {}

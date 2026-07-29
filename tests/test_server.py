@@ -396,3 +396,18 @@ def test_feed_control_defaults_running_and_round_trips(client):
     # Omitting the field reads without mutating.
     assert client.post("/api/feed_control", json={}).json() == {"paused": True}
     assert client.post("/api/feed_control", json={"paused": False}).json() == {"paused": False}
+
+
+def test_flag_label_rejects_whitespace_only(client):
+    """A target the operator cannot read the name of is not a usable target.
+
+    min_length=1 alone accepted "   ", producing a row in the target list with
+    no readable name — indistinguishable from any other blank one.
+    """
+    assert client.post("/api/targets", json={"label": "   "}).status_code == 422
+    assert client.post("/api/targets", json={"label": ""}).status_code == 422
+    # ...and a real label is still accepted, with surrounding space trimmed.
+    resp = client.post("/api/targets", json={"label": "  silver camry  "})
+    assert resp.status_code == 201
+    tid = resp.json()["target_id"]
+    assert client.get(f"/api/targets/{tid}").json()["label"] == "silver camry"

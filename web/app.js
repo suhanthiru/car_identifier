@@ -228,24 +228,42 @@ async function initRestart() {
     btn.disabled = true;
     btn.textContent = "⟲ RESTARTING";
     const before = latestStats ? latestStats.run_generation : -1;
+    armRestartWatchdog(before);
     const ok = await api("/api/reset", { method: "POST" }).catch(() => null);
-    if (!ok) { restartFinished("reset request failed"); return; }
-    // Watchdog. The button is re-enabled by the reset_done broadcast, but a
-    // dropped socket or a feed that dies mid-teardown would otherwise leave it
-    // disabled forever with no way back. Poll the generation counter as a
-    // second signal, and give up loudly rather than silently.
-    let waited = 0;
-    const watch = setInterval(() => {
-      waited += 500;
-      if (latestStats && latestStats.run_generation > before) {
-        clearInterval(watch);
-        restartFinished();
-      } else if (waited >= 20000) {
-        clearInterval(watch);
-        restartFinished("restart did not complete — check the server log");
-      }
-    }, 500);
+    if (!ok) restartFinished("reset request failed");
   };
+}
+
+let restartWatchdog = null;
+
+/** Guarantee the restart button comes back, whoever started the restart.
+ *
+ * The button is normally restored by the reset_done broadcast. This is the
+ * fallback for when that never arrives — a dropped socket, a server that goes
+ * away mid-teardown, a feed that dies. It used to live inside the button's own
+ * click handler, which meant a reset triggered ANY other way (the scenario
+ * picker, a second browser tab, a direct API call) disabled the button through
+ * onResetting and had nothing to re-enable it: the control was dead for the
+ * rest of the session with no way back short of a page reload.
+ */
+function armRestartWatchdog(beforeGeneration) {
+  clearInterval(restartWatchdog);
+  const before = beforeGeneration != null
+    ? beforeGeneration
+    : (latestStats ? latestStats.run_generation : -1);
+  let waited = 0;
+  restartWatchdog = setInterval(() => {
+    waited += 500;
+    if (latestStats && latestStats.run_generation > before) {
+      clearInterval(restartWatchdog);
+      restartWatchdog = null;
+      restartFinished();
+    } else if (waited >= 20000) {
+      clearInterval(restartWatchdog);
+      restartWatchdog = null;
+      restartFinished("restart did not complete — check the server log");
+    }
+  }, 500);
 }
 
 /** Put the restart button back, optionally reporting why it came back. */
@@ -1246,6 +1264,13 @@ function connect() {
       refreshAudit();
     }
   };
+  ws.onopen = () => {
+    // A reconnect means messages were missed, and the one that matters is
+    // reset_done: without it the restart button stays disabled forever. Re-arm
+    // the fallback rather than trusting a broadcast that may already be gone.
+    const btn = document.getElementById("feed-restart");
+    if (btn && btn.disabled) armRestartWatchdog();
+  };
   ws.onclose = () => setTimeout(connect, 1500);
 }
 
@@ -1264,6 +1289,10 @@ function onResetting() {
   });
   const btn = document.getElementById("feed-restart");
   if (btn) { btn.disabled = true; btn.textContent = "⟲ RESTARTING"; }
+  // Whatever started this restart — the button, the scenario picker, another
+  // tab — the button must come back. Arm the fallback here rather than only in
+  // the click handler.
+  armRestartWatchdog();
   // The browse grid belongs to the run that is ending. On a scenario switch it
   // belongs to a different scenario entirely, so it must not survive.
   vehicleTiles.clear();
