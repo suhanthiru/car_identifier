@@ -39,6 +39,20 @@ class _Passage:
     timestamp_s: float
 
 
+async def _publish_clock(state, clock, t0: float, time_scale: float,
+                         tick_s: float = 0.2) -> dict:
+    """Keep `state.replay_clock_s` on the replay's actual position.
+
+    Runs alongside the camera tasks and ends when they do — it is cancelled
+    with the rest of the gather. FeedClock already excludes paused wall time,
+    so this stops dead on pause and resumes exactly where it left off, which is
+    what makes the pause button visibly do something.
+    """
+    while True:
+        state.replay_clock_s = t0 + clock.elapsed() * time_scale
+        await asyncio.sleep(tick_s)
+
+
 def _passages_by_camera(
     scenario: CityFlowScenario, camera_dirs: dict[str, Path],
 ) -> dict[str, list[_Passage]]:
@@ -254,9 +268,23 @@ async def run_cityflow_feed(
     try:
         async with httpx.AsyncClient() as client:
             clock = FeedClock(pipeline_state)
-            results = await asyncio.gather(*(
-                _edge_node(cam, passages, perceptor, client, cfg, t0, clock)
-                for cam, passages in by_camera.items() if passages))
+            # Publish the replay position for the console to display. The
+            # server's `sim_now` is max(observed timestamp), which is the right
+            # clock for reasoning but a terrible one to look at: with five
+            # independent camera tasks it sits at whatever the LEADING camera
+            # last reported and cannot move until that same camera reports
+            # again, so it freezes for seconds at a time while the other four
+            # are still delivering sightings. That reads as "stalled" or
+            # "paused" when the replay is running perfectly.
+            publisher = asyncio.create_task(
+                _publish_clock(pipeline_state, clock, t0, cfg.time_scale))
+            try:
+                results = await asyncio.gather(*(
+                    _edge_node(cam, passages, perceptor, client, cfg, t0, clock)
+                    for cam, passages in by_camera.items() if passages))
+            finally:
+                # Runs forever by design; it ends when the cameras do.
+                publisher.cancel()
     finally:
         perceptor.close()
     cameras = [cam for cam, passages in by_camera.items() if passages]

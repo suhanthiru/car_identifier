@@ -169,8 +169,18 @@ async def run_feed(
 
     async with httpx.AsyncClient() as client:
         clock = FeedClock(pipeline_state)
-        results = await asyncio.gather(*(
-            _edge_node(cam, events, perceptor, client, cfg, t0, clock)
-            for cam, events in by_camera.items() if events))
+        # See server/real_feed._publish_clock: the console needs a clock that
+        # advances smoothly, not max(observed timestamp), which stalls whenever
+        # the leading camera is between reports.
+        from server.real_feed import _publish_clock
+
+        publisher = asyncio.create_task(
+            _publish_clock(pipeline_state, clock, t0, cfg.time_scale))
+        try:
+            results = await asyncio.gather(*(
+                _edge_node(cam, events, perceptor, client, cfg, t0, clock)
+                for cam, events in by_camera.items() if events))
+        finally:
+            publisher.cancel()
     cameras = [cam for cam, events in by_camera.items() if events]
     return dict(zip(cameras, results))

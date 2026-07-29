@@ -185,6 +185,9 @@ def create_app(
     state.manager = ConnectionManager()
     state.crops_dir = Path(crops_dir)
     state.sim_now = 0.0
+    # Replay position for display, published by the feed. None until a
+    # feed runs, so /api/stats can fall back to sim_now.
+    state.replay_clock_s = None
     state.target_seq = itertools.count(1)
     state.enable_3d = enable_3d
     state.enable_3d_identification = enable_3d_identification
@@ -959,6 +962,9 @@ def create_app(
         with state.tracker_lock:
             state.tracker = FleetTracker(state.graph, cascade_config)
         state.sim_now = 0.0
+        # The next feed republishes this; leaving the old value would
+        # show the previous run's position on a rewound clock.
+        state.replay_clock_s = None
         state.target_seq = itertools.count(1)
         state.counters = {k: 0 for k in state.counters}
         state._seen_vehicle_keys = set()
@@ -1003,8 +1009,16 @@ def create_app(
         if not duration and scen is not None:
             duration = max((sp.exit_s for sp in scen.spans), default=0.0)
             state.footage_duration_s = duration
+        # Two clocks, deliberately. `sim_now` is max(observed timestamp) and is
+        # what the reasoning layer uses; it is the honest answer to "what is the
+        # latest evidence timestamp". It is a poor thing to display, because it
+        # only moves when the leading camera reports and sits frozen for seconds
+        # in between. `clock_s` is the replay's actual position and is what the
+        # console shows, so a running replay looks like one.
+        replay = getattr(state, "replay_clock_s", None)
         return {
             "sim_now": state.sim_now,
+            "clock_s": state.sim_now if replay is None else min(replay, duration or replay),
             "footage_duration_s": duration,
             "paused": state.feed_paused,
             "world_source": state.world_source,
@@ -1190,10 +1204,36 @@ def create_app(
                                      name="vehicle-index").start()
             raise HTTPException(
                 503, f"building the vehicle index for {scenario}; retry shortly")
-        if min_cameras <= 1:
-            return state.cityflow_vehicle_index
-        return [v for v in state.cityflow_vehicle_index
-                if v.get("n_cameras", 1) >= min_cameras]
+        rows = state.cityflow_vehicle_index
+        if min_cameras > 1:
+            rows = [v for v in rows if v.get("n_cameras", 1) >= min_cameras]
+        # Strip the reference gallery. It is 3 FULL-RESOLUTION crops per
+        # vehicle and made this response 31 MB for S01's 95 vehicles — 94% of
+        # the payload — to draw a grid of 90px thumbnails. The browser parsed
+        # and held all of it on every load and every restart, which is most of
+        # why the console felt slow to come back. The gallery is only needed
+        # for the one vehicle actually being flagged, so it is fetched then.
+        return [{k: val for k, val in v.items() if k != "gallery_b64"}
+                for v in rows]
+
+    @app.get("/api/cityflow/{scenario}/vehicles/{vehicle_id}/gallery")
+    def cityflow_vehicle_gallery(scenario: str, vehicle_id: int):
+        """Full-resolution passage crops for ONE vehicle, for seeding a flag.
+
+        Separate from the browse list so the list stays small: these are the
+        crops the appearance model embeds, so they must not be downscaled, and
+        shipping 95 vehicles' worth to show thumbnails was pure waste.
+        """
+        scen = state.cityflow_scenario
+        if scen is None or scenario != scen.name:
+            raise HTTPException(404, f"scenario {scenario!r} is not active")
+        if state.cityflow_vehicle_index is None:
+            raise HTTPException(503, "vehicle index still building")
+        for v in state.cityflow_vehicle_index:
+            if v["vehicle_id"] == vehicle_id:
+                return {"vehicle_id": vehicle_id,
+                        "gallery_b64": v.get("gallery_b64") or []}
+        raise HTTPException(404, f"no vehicle {vehicle_id} in {scenario}")
 
     # ---------------------------------------------------------- inspector
 

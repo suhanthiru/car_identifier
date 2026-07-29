@@ -125,6 +125,18 @@ async function initMap() {
 /* ------------------------------------------------------- clock and scale */
 
 let latestStats = null;
+/** Replay position for display.
+ *
+ * NOT `sim_now`: that is max(observed timestamp), which the reasoning layer
+ * wants but which only moves when the leading camera reports and sits frozen
+ * for seconds in between — measured at 23 stalls up to 4.5s in 74s of
+ * playback, which reads as the system having hung. `clock_s` is the replay's
+ * real position and advances smoothly.
+ */
+function clockNow() {
+  if (!latestStats) return 0;
+  return latestStats.clock_s != null ? latestStats.clock_s : latestStats.sim_now;
+}
 // Single source of truth for the replay clock's paused state, owned by the
 // /api/stats poll and read by both the toolbar button and the pill.
 let feedPaused = false;
@@ -161,12 +173,14 @@ async function initClock() {
     const s = await api("/api/stats").catch(() => null);
     if (!s) return;
     latestStats = s;
-    document.getElementById("tb-clock").textContent = fmtClock(s.sim_now);
+    document.getElementById("tb-clock").textContent = fmtClock(
+      s.clock_s != null ? s.clock_s : s.sim_now);
     const total = s.footage_duration_s || 0;
     document.getElementById("tb-clock-total").textContent =
       total ? `/ ${fmtClock(total)}` : "";
     const fill = document.getElementById("tb-progress-fill");
-    if (fill) fill.style.width = total ? `${Math.min(100, 100 * s.sim_now / total)}%` : "0%";
+    const shown = s.clock_s != null ? s.clock_s : s.sim_now;
+    if (fill) fill.style.width = total ? `${Math.min(100, 100 * shown / total)}%` : "0%";
     // The button is disabled only while its own POST is in flight; skip the
     // repaint then, so a poll that started before the click cannot overwrite
     // the state the click is still establishing.
@@ -419,7 +433,7 @@ async function initCityflowVehicleBrowser() {
   const WATCH_MIN_SPAN_S = 20;
   const mode = document.getElementById("cf-mode");
   const render = () => {
-    const now = latestStats ? latestStats.sim_now : 0;
+    const now = clockNow();
     const how = mode ? mode.value : "watchable";
     const upcoming = (v) => (v.first_time_s || 0) >= now - 2;
     // Still worth showing while it is on screen, not only before it arrives.
@@ -530,6 +544,16 @@ function renderVehicleTiles(vehicles) {
 }
 
 async function flagCityflowVehicle(v) {
+  // Fetch this vehicle's full-resolution crops now, rather than having the
+  // browse list carry every vehicle's (31 MB for S01, to draw thumbnails).
+  let gallery = v.gallery_b64;
+  if (!gallery) {
+    const g = await api(
+      `/api/cityflow/${currentScenario}/vehicles/${v.vehicle_id}/gallery`
+    ).catch(() => null);
+    gallery = (g && g.gallery_b64) || [];
+  }
+  v = Object.assign({}, v, { gallery_b64: gallery });
   await api("/api/targets", {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -591,7 +615,7 @@ function openCameraView(cameraId) {
     note.textContent = baseNote;
   };
   const tick = () => {
-    const t = latestStats ? latestStats.sim_now : 0;
+    const t = clockNow();
     img.src = `/api/cityflow/camera/${encodeURIComponent(cameraId)}/frame.jpg?t=${t.toFixed(2)}`;
   };
   tick();
@@ -718,7 +742,7 @@ async function initTimeline() {
   const heads = host.querySelectorAll(".tl-playhead");
   setInterval(() => {
     if (!latestStats) return;
-    const pct = 100 * Math.min(1, latestStats.sim_now / tl.duration_s);
+    const pct = 100 * Math.min(1, clockNow() / tl.duration_s);
     heads.forEach((h) => { h.style.left = `${pct.toFixed(2)}%`; });
   }, 500);
 }

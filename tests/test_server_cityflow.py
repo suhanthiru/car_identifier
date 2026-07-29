@@ -75,12 +75,21 @@ def _vehicles(client, path="/api/cityflow/S01/vehicles", tries=60):
     raise AssertionError("vehicle index never finished building")
 
 
+def client_gallery(client, vehicle_id, scenario="S01"):
+    resp = client.get(f"/api/cityflow/{scenario}/vehicles/{vehicle_id}/gallery")
+    assert resp.status_code == 200, resp.status_code
+    return resp.json()["gallery_b64"]
+
+
 def test_vehicles_returns_real_shape_with_thumbnail(cityflow_client):
     vehicles = _vehicles(cityflow_client)
     assert len(vehicles) == 1
     v = vehicles[0]
+    # gallery_b64 is deliberately ABSENT: three full-resolution crops per
+    # vehicle made this response 31 MB for 95 vehicles, to draw thumbnails.
+    # It is fetched per-vehicle at flag time instead.
     assert set(v.keys()) == {"vehicle_id", "first_camera", "first_time_s",
-                             "thumbnail_b64", "gallery_b64",
+                             "thumbnail_b64",
                              "n_cameras", "n_passages", "cameras",
                              "visible_s", "span_s", "last_time_s"}
     # Watchability metrics the browse panel filters and sorts on.
@@ -89,8 +98,10 @@ def test_vehicles_returns_real_shape_with_thumbnail(cityflow_client):
     assert v["vehicle_id"] == 7
     assert v["first_camera"] == "c001"
     assert v["thumbnail_b64"]
-    # Reference-gallery seeds: >=1 real passage crop, thumbnail among them.
-    assert v["gallery_b64"] and v["thumbnail_b64"] in v["gallery_b64"]
+    # Reference-gallery seeds come from the per-vehicle endpoint: >=1 real
+    # passage crop, with the thumbnail among them.
+    g = client_gallery(cityflow_client, v["vehicle_id"])
+    assert g and v["thumbnail_b64"] in g
     assert v["n_cameras"] == len(v["cameras"]) >= 1
 
 
