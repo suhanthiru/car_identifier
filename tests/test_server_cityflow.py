@@ -63,7 +63,11 @@ def test_vehicles_returns_real_shape_with_thumbnail(cityflow_client):
     v = vehicles[0]
     assert set(v.keys()) == {"vehicle_id", "first_camera", "first_time_s",
                              "thumbnail_b64", "gallery_b64",
-                             "n_cameras", "n_passages", "cameras"}
+                             "n_cameras", "n_passages", "cameras",
+                             "visible_s", "span_s", "last_time_s"}
+    # Watchability metrics the browse panel filters and sorts on.
+    assert v["visible_s"] >= 0 and v["span_s"] >= 0
+    assert v["last_time_s"] >= v["first_time_s"]
     assert v["vehicle_id"] == 7
     assert v["first_camera"] == "c001"
     assert v["thumbnail_b64"]

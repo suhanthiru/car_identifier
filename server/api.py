@@ -229,14 +229,45 @@ def create_app(
     state.cityflow_scenario = None
     state.cityflow_camera_dirs = {}
     state.cityflow_vehicle_index = None  # lazily built + cached
-    if cityflow_scenario_name and state.cityflow_root:
+    state.pending_scenario = ""          # set by POST /api/cityflow/scenario
+
+    def load_scenario(name: str):
+        """Point the server at a different scenario: graph, cameras, index.
+
+        Called by the supervisor between runs, never mid-replay — the feed,
+        the tracker and the map all have to agree on which cameras exist.
+        """
         from datasets.cityflow import CityFlow
         from datasets.cityflow_video import discover_camera_dirs
 
-        state.cityflow_scenario = CityFlow(state.cityflow_root).load_scenario(
-            cityflow_scenario_name)
-        state.cityflow_camera_dirs = discover_camera_dirs(
-            state.cityflow_root, cityflow_scenario_name)
+        scen = CityFlow(state.cityflow_root).load_scenario(name)
+        state.cityflow_scenario = scen
+        state.cityflow_camera_dirs = discover_camera_dirs(state.cityflow_root, name)
+        state.cityflow_vehicle_index = None      # rebuilt for the new scenario
+        state.footage_duration_s = 0.0
+        # Per-camera video handles belong to the old scenario's files.
+        for src in (getattr(state, "_frame_sources", None) or {}).values():
+            try:
+                src.close()
+            except Exception:                    # noqa: BLE001
+                pass
+        state._frame_sources = {}
+        state.graph = scen.to_road_graph()
+        with Session(engine) as session:
+            # store_graph merges but never deletes, so switching scenarios
+            # would leave the previous one's cameras and edges in the registry.
+            # The persisted topology must describe the scenario now running.
+            from sqlalchemy import delete as sa_delete
+
+            session.exec(sa_delete(dbm.AdjacencyRow))
+            session.exec(sa_delete(dbm.CameraRow))
+            session.commit()
+            dbm.store_graph(session, state.graph)
+        return scen
+
+    state.load_scenario = load_scenario
+    if cityflow_scenario_name and state.cityflow_root:
+        load_scenario(cityflow_scenario_name)
     state.render_embedder = None       # lazy ReidEmbedder for render-and-compare
     _rc_path = Path("car3d/artifacts/render_compare.json")
     state.render_calibrator = None
@@ -873,11 +904,11 @@ def create_app(
 
     @app.get("/api/cameras")
     def camera_registry():
-        return [dataclasses.asdict(c) for c in graph.cameras]
+        return [dataclasses.asdict(c) for c in state.graph.cameras]
 
     @app.get("/api/adjacency")
     def camera_adjacency():
-        return [dataclasses.asdict(e) for e in graph.edges]
+        return [dataclasses.asdict(e) for e in state.graph.edges]
 
     @app.get("/api/world_source")
     def world_source_info():
@@ -922,7 +953,7 @@ def create_app(
         import shutil
 
         with state.tracker_lock:
-            state.tracker = FleetTracker(graph, cascade_config)
+            state.tracker = FleetTracker(state.graph, cascade_config)
         state.sim_now = 0.0
         state.target_seq = itertools.count(1)
         state.counters = {k: 0 for k in state.counters}
@@ -977,13 +1008,39 @@ def create_app(
             "scenario": scen.name if scen is not None else "",
             "counters": dict(state.counters),
             "scale": {
-                "cameras": len(graph.cameras),
+                "cameras": len(state.graph.cameras),
                 "ground_truth_vehicles": (
                     len({sp.vehicle_id for sp in scen.spans}) if scen else 0),
                 "ground_truth_tracks": len(scen.spans) if scen else 0,
-                "transit_routes": len(graph.edges),
+                "transit_routes": len(state.graph.edges),
             },
         }
+
+    @app.post("/api/cityflow/scenario")
+    async def switch_scenario(req: dict):
+        """Replay a different scenario without restarting the process.
+
+        Implemented as a reset with a target scenario attached, because that is
+        exactly what it is: a different scenario means different cameras, a
+        different road graph and a different feed, so continuing the current
+        run's targets and beliefs across the switch would be meaningless. The
+        supervisor performs the swap between runs, where it owns the feed.
+        """
+        name = str(req.get("scenario") or "").strip()
+        if state.cityflow_root is None:
+            raise HTTPException(400, "not running a real-data scenario")
+        from datasets.cityflow import CityFlow
+
+        available = CityFlow(Path(state.cityflow_root)).scenario_names()
+        if name not in available:
+            raise HTTPException(
+                404, f"unknown scenario {name!r}; have {available}")
+        if state.cityflow_scenario is not None and name == state.cityflow_scenario.name:
+            return {"switching": False, "scenario": name, "reason": "already active"}
+        state.pending_scenario = name
+        state.restart_requested = True
+        await state.manager.broadcast({"type": "resetting", "scenario": name})
+        return {"switching": True, "scenario": name}
 
     @app.post("/api/reset")
     async def reset_run():
@@ -1123,7 +1180,7 @@ def create_app(
         from reasoning.cascade import CascadeConfig, rank_candidates
         from reasoning.profile import LastSeen, TargetProfile
 
-        known = set(graph.camera_ids())
+        known = set(state.graph.camera_ids())
         bad_cams = {req.sighting.camera_id} - known
         for t in req.targets:
             if t.last_seen_camera_id:
@@ -1170,7 +1227,7 @@ def create_app(
 
         cfg = CascadeConfig(distinctiveness_floor=req.distinctiveness_floor) \
             if req.distinctiveness_floor is not None else CascadeConfig()
-        ranked = rank_candidates(obs, profiles, graph, cfg)
+        ranked = rank_candidates(obs, profiles, state.graph, cfg)
 
         def decision_json(d):
             return {
@@ -1224,7 +1281,7 @@ def create_app(
         from sim.model import VehicleIdentity
         from sim.render import COLOR_BGR, render_frame
 
-        if camera_id not in graph.camera_ids():
+        if camera_id not in state.graph.camera_ids():
             raise HTTPException(422, f"unknown camera id: {camera_id}")
         try:
             data = json.loads(payload)
@@ -1245,7 +1302,7 @@ def create_app(
             color=color,
             instance_attrs={str(k): str(v) for k, v in (data.get("instance_attrs") or {}).items()},
         )
-        frame = render_frame(vehicle, graph.camera(camera_id), timestamp_s)
+        frame = render_frame(vehicle, state.graph.camera(camera_id), timestamp_s)
         ok, png = cv2.imencode(".png", frame)
         if not ok:
             raise HTTPException(500, "render failed")

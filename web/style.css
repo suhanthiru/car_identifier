@@ -142,6 +142,12 @@ body {
   background: #14301f; color: #8ee0a8;
 }
 .vt-cams-single { background: #2a1e12; color: #d0a06a; }
+/* How long this car is actually on screen — the number that decides whether
+   following it is rewarding or over before you have clicked. */
+.vt-watch {
+  display: inline-block; margin-left: 2px; padding: 0 3px; border-radius: 2px;
+  background: #14243a; color: #8fc0f0;
+}
 .vt-filter {
   display: flex; align-items: center; gap: 5px; cursor: pointer;
   font-size: 10px; color: var(--dim); margin: 0 0 6px;
@@ -156,6 +162,12 @@ body {
   border-radius: 4px; padding: 10px;
 }
 .vt-empty b { color: var(--text); font-weight: 600; }
+.scenario-select {
+  background: var(--panel-2); border: 1px solid var(--line); color: var(--text);
+  border-radius: 3px; font-size: 10px; padding: 1px 4px; cursor: pointer;
+  font-family: Consolas, monospace; letter-spacing: 0;
+}
+.scenario-select:disabled { opacity: .5; cursor: progress; }
 /* Click feedback. A POST with no visible effect near the tile reads as a
    dropped click and invites a second one. */
 .vehicle-tile.flagging { opacity: .45; cursor: progress; }

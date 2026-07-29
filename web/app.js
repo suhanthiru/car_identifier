@@ -299,14 +299,45 @@ async function initPipelineStrip() {
   setInterval(refresh, 5000);
 }
 
+/** Scenario picker. Switching is a restart, so it says so before doing it. */
+function buildScenarioSelect(scenarios, active) {
+  const sel = document.getElementById("cityflow-scenario-select");
+  if (!sel) return;
+  sel.innerHTML = scenarios.map((s) =>
+    `<option value="${escapeHtml(s)}"${s === active ? " selected" : ""}>${escapeHtml(s)}</option>`
+  ).join("");
+  sel.onchange = async () => {
+    const want = sel.value;
+    if (want === active) return;
+    if (!confirm(`Replay ${want} instead of ${active}?\n\n`
+                 + "Different cameras and different footage, so this restarts "
+                 + "the run and clears its targets, reviews and 3D models.")) {
+      sel.value = active;
+      return;
+    }
+    sel.disabled = true;
+    const r = await api("/api/cityflow/scenario", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ scenario: want }),
+    }).catch(() => null);
+    if (!r) { sel.disabled = false; sel.value = active; }
+  };
+}
+
 async function initCityflowVehicleBrowser() {
   const section = document.getElementById("cityflow-vehicles-section");
   const scenarios = await api("/api/cityflow/scenarios").catch(() => []);
   if (!scenarios.length) return;
-  const scenario = scenarios[0];
+  // The ACTIVE scenario, not scenarios[0]. Only one scenario is loaded at a
+  // time and the vehicles endpoint rejects any other, so taking the first of
+  // the discovered list silently 404s whenever the running scenario is not
+  // alphabetically first — which is every scenario except S01.
+  const stats = latestStats || await api("/api/stats").catch(() => null);
+  const scenario = (stats && stats.scenario) || scenarios[0];
   const all = await api(`/api/cityflow/${scenario}/vehicles`).catch(() => []);
   if (!all.length) return;
-  document.getElementById("cityflow-scenario-tag").textContent = scenario;
+  currentScenario = scenario;
+  buildScenarioSelect(scenarios, scenario);
   document.getElementById("flag-section").classList.add("hidden");
   section.classList.remove("hidden");
 
@@ -321,17 +352,33 @@ async function initCityflowVehicleBrowser() {
   // has already gone by: there is no future sighting left to associate, so the
   // review queue stays empty and a working system looks broken. That is a
   // function of the clock, so the list is re-filtered as it advances.
-  const toggle = document.getElementById("cf-upcoming-only");
+  // "Worth watching" is measured, not guessed. On S01 seconds-visible spans
+  // 7-154s (median 20) and journey length 5-76s (median 16), so most of the
+  // list is a car that crosses one view and is gone before you can select it.
+  // The default keeps those that are still ahead AND stay on screen long
+  // enough AND actually travel, sorted longest-journey first.
+  const WATCH_MIN_VISIBLE_S = 15;
+  const WATCH_MIN_SPAN_S = 20;
+  const mode = document.getElementById("cf-mode");
   const render = () => {
     const now = latestStats ? latestStats.sim_now : 0;
-    const upcomingOnly = !toggle || toggle.checked;
-    const shown = all.filter(
-      (v) => !upcomingOnly || (v.first_time_s || 0) >= now - 2);
+    const how = mode ? mode.value : "watchable";
+    const upcoming = (v) => (v.first_time_s || 0) >= now - 2;
+    // Still worth showing while it is on screen, not only before it arrives.
+    const running = (v) => (v.last_time_s || 0) > now;
+    let shown = all;
+    if (how === "upcoming") shown = all.filter(upcoming);
+    else if (how === "watchable") {
+      shown = all.filter((v) => running(v)
+        && (v.visible_s || 0) >= WATCH_MIN_VISIBLE_S
+        && (v.span_s || 0) >= WATCH_MIN_SPAN_S);
+      shown = shown.slice().sort((a, b) => (b.span_s || 0) - (a.span_s || 0));
+    }
     const count = document.getElementById("cf-vehicle-count");
     if (count) {
-      count.textContent = upcomingOnly
-        ? `${shown.length} of ${all.length} still to come`
-        : `all ${all.length} vehicles`;
+      count.textContent = how === "all"
+        ? `all ${all.length}`
+        : `${shown.length} of ${all.length}`;
     }
     // Only rebuild when the visible SET changes. Re-rendering unconditionally
     // every few seconds tore down and recreated every tile under the cursor,
@@ -342,7 +389,7 @@ async function initCityflowVehicleBrowser() {
     lastVehicleKey = key;
     renderVehicleTiles(shown);
   };
-  if (toggle) toggle.onchange = () => { lastVehicleKey = null; render(); };
+  if (mode) mode.onchange = () => { lastVehicleKey = null; render(); };
   render();
   // Keeps "still to come" true as the clock advances; now a no-op unless the
   // set actually changed.
@@ -374,9 +421,10 @@ function renderVehicleTiles(vehicles) {
     // Once the replay passes the last vehicle this list empties, and a bare
     // grid reads as a broken panel rather than an exhausted one. Say which it
     // is, and name the two ways forward.
-    grid.innerHTML = `<div class="vt-empty">Every vehicle in this scenario has
-      already driven through. Untick <b>still to come</b> to browse them anyway,
-      or <b>⟲ RESTART</b> to replay from t=0.</div>`;
+    grid.innerHTML = `<div class="vt-empty">Nothing left matching this filter —
+      every vehicle it wanted has already driven through. Switch to
+      <b>all vehicles</b> to browse them anyway, or <b>⟲ RESTART</b> to replay
+      from t=0.</div>`;
     return;
   }
   vehicles.forEach((v) => {
@@ -394,8 +442,14 @@ function renderVehicleTiles(vehicles) {
     // it is also why the transit windows collapse to their floor.
     const badge = `<span class="vt-cams${cams >= 2 ? "" : " vt-cams-single"}" `
       + `title="${escapeHtml((v.cameras || []).join(', '))}">${cams} cam${cams === 1 ? "" : "s"}</span>`;
-    tile.innerHTML = `${img}<div class="vt-label">#${escapeHtml(String(v.vehicle_id))} · ${escapeHtml(v.first_camera)} · t+${Math.round(v.first_time_s)}s ${badge}</div>`;
-    tile.title = `Flag vehicle ${v.vehicle_id} as a target`;
+    // Seconds-visible is the number that decides whether following this car is
+    // rewarding or over before you have selected it, so it goes on the tile.
+    const watch = v.visible_s
+      ? `<span class="vt-watch" title="on screen for ${v.visible_s}s in total; its journey spans ${v.span_s}s">${Math.round(v.visible_s)}s</span>`
+      : "";
+    tile.innerHTML = `${img}<div class="vt-label">#${escapeHtml(String(v.vehicle_id))} · ${escapeHtml(v.first_camera)} · t+${Math.round(v.first_time_s)}s ${badge}${watch}</div>`;
+    tile.title = `Flag vehicle ${v.vehicle_id} — visible ${v.visible_s || "?"}s `
+      + `across ${cams} camera${cams === 1 ? "" : "s"}, journey spans ${v.span_s || "?"}s`;
     tile.onclick = async () => {
       // Feedback and a guard. A click used to fire off a POST with no visible
       // effect anywhere near the tile, so it read as "nothing happened" and
@@ -511,6 +565,9 @@ let clipKeyHandler = null;   // detached on close so it cannot outlive the view
 // Ids currently on screen in the browse grid, so a periodic refresh only
 // rebuilds when the set really changed (see initCityflowVehicleBrowser).
 let lastVehicleKey = null;
+// Scenario this page is currently describing. A switch changes the cameras,
+// so the map and timeline must be rebuilt rather than repopulated.
+let currentScenario = "";
 
 /** The flagged vehicle's own recorded passage, over the whole map.
  *
@@ -1098,7 +1155,7 @@ function connect() {
       // avoid.
       onResetting();
     } else if (msg.type === "reset_done") {
-      onResetDone();
+      onResetDone(msg);
     } else {
       pushAlert(msg);
       if (["review", "anomaly", "association", "rejection"].includes(msg.type)) {
@@ -1125,15 +1182,32 @@ function onResetting() {
   });
   const btn = document.getElementById("feed-restart");
   if (btn) { btn.disabled = true; btn.textContent = "⟲ RESTARTING"; }
+  // The browse grid belongs to the run that is ending. On a scenario switch it
+  // belongs to a different scenario entirely, so it must not survive.
+  vehicleTiles.clear();
+  lastVehicleKey = null;
+  const grid = document.getElementById("cityflow-vehicles");
+  if (grid) grid.innerHTML = "";
 }
 
-function onResetDone() {
+async function onResetDone(msg) {
+  const previousScenario = currentScenario;
   restartFinished();
   refreshReviews();
   refreshAudit();
+  const sel = document.getElementById("cityflow-scenario-select");
+  if (sel) sel.disabled = false;
+  // Pick up the new clock immediately rather than waiting for the next poll,
+  // so the browse list is filtered against the rewound time and not the old one.
+  latestStats = await api("/api/stats").catch(() => latestStats);
   // The vehicle browser is keyed to the clock (it hides passages already gone
   // by), so it has to be rebuilt against the rewound timeline.
   initCityflowVehicleBrowser();
+  // A scenario switch changes the cameras, so the map and the timeline are
+  // describing the wrong place until they are rebuilt too.
+  if (msg && msg.scenario && previousScenario && msg.scenario !== previousScenario) {
+    location.reload();
+  }
 }
 
 // initMap owns the clock, restart and timeline init: the timeline only exists

@@ -101,10 +101,10 @@ def build_vehicle_index(
     import cv2
 
     cache = _index_cache_path(scenario.name)
-    # v2: entries gained n_cameras/n_passages. Bumped so an existing cache from
-    # before that change is rebuilt rather than served without the fields the
-    # browse panel now filters on.
-    key = f"v2:{scenario.name}:{len(scenario.spans)}:{len(camera_dirs)}"
+    # v3: entries gained visible_s/span_s/last_time_s. Bumped so an existing
+    # cache from before that change is rebuilt rather than served without the
+    # fields the browse panel now filters and sorts on.
+    key = f"v3:{scenario.name}:{len(scenario.spans)}:{len(camera_dirs)}"
     if use_cache and cache.is_file():
         try:
             blob = json.loads(cache.read_text())
@@ -120,6 +120,15 @@ def build_vehicle_index(
     # that can actually exercise re-identification.
     cameras_per_vehicle: dict[int, set[str]] = {}
     passages_per_vehicle: dict[int, int] = {}
+    # How watchable each vehicle is. Measured on S01: seconds-visible runs from
+    # 7s to 154s (median 20) and the journey span from 5s to 76s (median 16),
+    # so "how long can I actually watch this car, and does it go anywhere"
+    # separates the list hard. Crop size deliberately is NOT part of this — at
+    # passage midpoint every vehicle is at least 74px on its short side
+    # (median 269), so it discriminates nothing here.
+    visible_s: dict[int, float] = {}
+    first_s: dict[int, float] = {}
+    last_s: dict[int, float] = {}
     for span in scenario.spans:
         cur = earliest.get(span.vehicle_id)
         if cur is None or span.enter_s < cur.enter_s:
@@ -127,6 +136,12 @@ def build_vehicle_index(
         cameras_per_vehicle.setdefault(span.vehicle_id, set()).add(span.camera_id)
         passages_per_vehicle[span.vehicle_id] = \
             passages_per_vehicle.get(span.vehicle_id, 0) + 1
+        visible_s[span.vehicle_id] = (visible_s.get(span.vehicle_id, 0.0)
+                                      + max(0.0, span.exit_s - span.enter_s))
+        first_s[span.vehicle_id] = min(first_s.get(span.vehicle_id, span.enter_s),
+                                       span.enter_s)
+        last_s[span.vehicle_id] = max(last_s.get(span.vehicle_id, span.exit_s),
+                                      span.exit_s)
 
     sources: dict[str, VideoFrameSource] = {}
     out: list[dict] = []
@@ -173,6 +188,9 @@ def build_vehicle_index(
             "n_cameras": len(cameras_per_vehicle.get(vid, ())),
             "n_passages": passages_per_vehicle.get(vid, 0),
             "cameras": sorted(cameras_per_vehicle.get(vid, ())),
+            "visible_s": round(visible_s.get(vid, 0.0), 1),
+            "span_s": round(last_s.get(vid, 0.0) - first_s.get(vid, 0.0), 1),
+            "last_time_s": round(last_s.get(vid, 0.0), 2),
         })
     for src in sources.values():
         src.close()

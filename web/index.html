@@ -111,10 +111,16 @@
     </div>
     <div id="side-targets" class="panel-scroll">
       <section id="cityflow-vehicles-section" class="hidden">
-        <div class="panel-subhead">BROWSE REAL VEHICLES <span id="cityflow-scenario-tag" class="pill"></span></div>
-        <label class="vt-filter" title="Flagging a car whose passage has already gone by leaves nothing for the cascade to associate — the review queue stays empty and a working run looks broken. Every vehicle here is multi-camera already; timing is what actually matters.">
-          <input type="checkbox" id="cf-upcoming-only" checked>
-          still to come only
+        <div class="panel-subhead">BROWSE REAL VEHICLES
+          <select id="cityflow-scenario-select" class="scenario-select"
+                  title="Replay a different scenario. Different cameras and footage, so this restarts the run and clears it."></select>
+        </div>
+        <label class="vt-filter" title="Every vehicle here is multi-camera already, so that is not a useful filter. What varies is whether a car is still to come, and whether it is on screen long enough and travels far enough to be worth watching.">
+          <select id="cf-mode" class="scenario-select">
+            <option value="watchable" selected>worth watching</option>
+            <option value="upcoming">still to come</option>
+            <option value="all">all vehicles</option>
+          </select>
           <span id="cf-vehicle-count" class="vt-count"></span>
         </label>
         <div id="cityflow-vehicles" class="vehicle-grid"></div>

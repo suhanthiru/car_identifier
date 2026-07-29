@@ -172,12 +172,10 @@ def run_synthetic(port: int, time_scale: float, open_browser: bool) -> None:
         webbrowser.open(base)
     print(f"\n  replaying the synthetic world at {time_scale}x - watch the console\n")
 
-    counts = asyncio.run(_supervise_feed(
-        app, lambda: run_feed(
-            build_default_world(),
-            FeedConfig(base_url=base, time_scale=time_scale),
-            pipeline_state=app.state)))
-    _idle(server, sum(counts.values()), len(counts))
+    _run_until_quit(server, app, lambda: run_feed(
+        build_default_world(),
+        FeedConfig(base_url=base, time_scale=time_scale),
+        pipeline_state=app.state))
 
 
 def run_cityflow(port: int, time_scale: float, open_browser: bool, scenario: str,
@@ -231,14 +229,21 @@ def run_cityflow(port: int, time_scale: float, open_browser: bool, scenario: str
     print(f"\n  replaying {scenario} at {time_scale}x - browse the thumbnails "
           f"and click any car to track it\n")
 
-    counts = asyncio.run(_supervise_feed(
-        app, lambda: run_cityflow_feed(
-            scen, camera_dirs, scen.camera_gps(), app.state,
-            CityFlowFeedConfig(base_url=base, time_scale=time_scale))))
-    _idle(server, sum(counts.values()), len(counts))
+    def make_feed():
+        # Read the scenario off state each time rather than closing over the
+        # one loaded at startup: a scenario switch replaces it between runs,
+        # and a captured reference would keep replaying the old footage while
+        # the map and the browse list showed the new scenario.
+        active = app.state.cityflow_scenario
+        return run_cityflow_feed(
+            active, app.state.cityflow_camera_dirs, active.camera_gps(),
+            app.state,
+            CityFlowFeedConfig(base_url=base, time_scale=time_scale))
+
+    _run_until_quit(server, app, make_feed)
 
 
-async def _supervise_feed(app, make_feed) -> dict:
+async def _supervise_feed(app, make_feed, on_idle=None) -> dict:
     """Run the replay, and rerun it from t=0 whenever a reset is requested.
 
     POST /api/reset only sets a flag: the feed's camera tasks live in this
@@ -252,19 +257,32 @@ async def _supervise_feed(app, make_feed) -> dict:
     /api/feed_control refuses to do by offering pause and not rewind.
     """
     state = app.state
+    announced = False
     while True:
         task = asyncio.create_task(make_feed())
         while not task.done():
             if getattr(state, "restart_requested", False):
                 task.cancel()
                 break
-            await asyncio.sleep(0.2)
+            await asyncio.sleep(0.1)
         try:
             counts = await task
         except asyncio.CancelledError:
             counts = {}
+        # The feed finished on its own. Do NOT return: the console stays live
+        # and RESTART is most likely to be pressed exactly here, once the
+        # operator has watched the whole replay. Returning handed control to a
+        # sleep loop that never looked at the flag, so the button did nothing
+        # and the client sat out its 20s watchdog — "slow, or simply doesn't
+        # work". Keep owning the loop and wait for the request instead.
         if not getattr(state, "restart_requested", False):
-            return counts
+            if not announced:
+                announced = True
+                if on_idle is not None:
+                    on_idle(counts)
+            while not getattr(state, "restart_requested", False):
+                await asyncio.sleep(0.1)
+        announced = False
         print("\n  reset requested - clearing this run and replaying from t=0\n")
         # Let any in-flight 3D fusion finish before the directories go: the
         # worker holds file handles under targets3d, and yanking them mid-write
@@ -274,9 +292,20 @@ async def _supervise_feed(app, make_feed) -> dict:
             await asyncio.get_running_loop().run_in_executor(
                 None, lambda: [j.cancel() for j in
                                list(getattr(state, "car3d_jobs", {}).values())])
+        # A scenario switch is a reset with a different scenario attached: new
+        # cameras, new graph, new footage, so nothing from the old run could
+        # carry across meaningfully. Swap before reset_runtime so the rebuilt
+        # tracker is built against the new graph.
+        pending = getattr(state, "pending_scenario", "")
+        if pending:
+            state.pending_scenario = ""
+            print(f"  switching scenario -> {pending}")
+            state.load_scenario(pending)
         state.reset_runtime()
-        await state.manager.broadcast({"type": "reset_done",
-                                       "run_generation": state.run_generation})
+        await state.manager.broadcast({
+            "type": "reset_done", "run_generation": state.run_generation,
+            "scenario": (state.cityflow_scenario.name
+                         if state.cityflow_scenario is not None else "")})
 
 
 def _serve(app, port: int) -> "uvicorn.Server":
@@ -288,13 +317,23 @@ def _serve(app, port: int) -> "uvicorn.Server":
     return server
 
 
-def _idle(server: uvicorn.Server, sightings: int, cameras: int) -> None:
-    print(f"\n  replay complete: {sightings} sightings across {cameras} cameras.")
-    print("  the console stays live - keep working the review queue.")
-    print("  ctrl+c to quit.\n")
+def _run_until_quit(server: "uvicorn.Server", app, make_feed) -> None:
+    """Own the replay for the life of the process.
+
+    The supervisor never returns now, because the console outlives the feed:
+    after a replay ends the operator keeps working the queue, and may press
+    RESTART at any point. This used to hand off to a plain sleep loop that
+    ignored the restart flag, which made the button dead precisely when it was
+    most likely to be used.
+    """
+    def announce(counts: dict) -> None:
+        print(f"\n  replay complete: {sum(counts.values())} sightings across "
+              f"{len(counts)} cameras.")
+        print("  the console stays live - keep working the review queue.")
+        print("  press RESTART in the console to replay from t=0; ctrl+c to quit.\n")
+
     try:
-        while True:
-            time.sleep(1)
+        asyncio.run(_supervise_feed(app, make_feed, on_idle=announce))
     except KeyboardInterrupt:
         server.should_exit = True
         print("  bye")
