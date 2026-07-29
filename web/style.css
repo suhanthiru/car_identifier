@@ -151,6 +151,19 @@ body {
 /* A car that never leaves anyone's view poses no re-identification problem;
    say so plainly rather than dressing it as a lesser version of one. */
 .vt-watch-none { background: #23262b; color: var(--dim); }
+
+/* "What has the system actually done about this target." A quiet queue must
+   not look the same as an unexamined one. */
+.attn {
+  margin-top: 5px; font-size: 9.5px; font-family: Consolas, monospace;
+  color: var(--dim); border-top: 1px solid var(--line); padding-top: 4px;
+}
+.attn b { color: var(--text); font-weight: 600; }
+/* Examined and rejected: a real answer, not an absence of one. */
+.attn-quiet { color: #d0a06a; }
+.attn-quiet b { color: #e0b784; }
+/* Genuinely not looked at yet — the honest other case. */
+.attn-idle { color: var(--dim); font-style: italic; }
 .vt-filter {
   display: flex; align-items: center; gap: 5px; cursor: pointer;
   font-size: 10px; color: var(--dim); margin: 0 0 6px;

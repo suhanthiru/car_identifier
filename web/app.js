@@ -872,6 +872,39 @@ function renderTargetsOnMap(targets) {
 
 /* --------------------------------------------------------------- sidebar */
 
+/** Say what the system has actually done about this target.
+ *
+ * An empty review queue means one of two entirely different things: the
+ * cascade has been examining this target against every sighting and rejecting
+ * each one, or nothing has ever been compared against it. Those were rendered
+ * identically — a quiet card with a belief of zero — so a working system and a
+ * broken one looked the same, and "flag a car, nothing happens" was
+ * indistinguishable from "flag a car, the system considered it 47 times and
+ * honestly concluded none of them matched".
+ *
+ * For a project whose central claim is that it refuses rather than guesses,
+ * being unable to show the refusing is the wrong silence.
+ */
+function attentionHtml(a) {
+  if (!a) return "";
+  if (!a.considered) {
+    return `<div class="attn attn-idle" title="No sighting has been evaluated against this target yet. Either none has arrived since you flagged it, or the replay has not reached this vehicle.">
+      not yet compared against any sighting</div>`;
+  }
+  const bits = [`compared against <b>${a.considered}</b> sighting${a.considered === 1 ? "" : "s"}`];
+  if (a.reviews) bits.push(`<b>${a.reviews}</b> to review`);
+  if (a.associations) bits.push(`<b>${a.associations}</b> matched`);
+  if (a.vetoed) bits.push(`<b>${a.vetoed}</b> vetoed`);
+  const quiet = !a.reviews && !a.associations;
+  const why = a.last_veto
+    ? `Most recent veto: ${a.last_veto}`
+    : `Best score so far ${a.best_score} (latest verdict "${a.last_verdict}"). `
+      + `A score below the match threshold is the cascade declining to conclude, `
+      + `not a failure to look.`;
+  return `<div class="attn ${quiet ? "attn-quiet" : ""}" title="${escapeHtml(why)}">
+    ${bits.join(" · ")}${quiet ? " — none matched" : ""}</div>`;
+}
+
 function renderTargetList(targets) {
   const el = document.getElementById("targets");
   const entries = Object.entries(targets);
@@ -884,7 +917,8 @@ function renderTargetList(targets) {
       <b>${escapeHtml(t.label || id)}</b><br>
       <span style="color:var(--dim)">${t.plate ? "plate " + escapeHtml(t.plate) : "plate unknown"}
       ${t.last_seen ? " · last seen " + escapeHtml(t.last_seen.camera_id) : " · never seen"}</span>
-      <div class="meter"><div style="width:${Math.round(t.belief * 100)}%"></div></div>`;
+      <div class="meter"><div style="width:${Math.round(t.belief * 100)}%"></div></div>
+      ${attentionHtml(t.attention)}`;
     card.onclick = () => openDossier(id);
     el.appendChild(card);
   });

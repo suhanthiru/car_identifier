@@ -21,8 +21,8 @@ from typing import Mapping
 
 from perception.types import Observation
 from reasoning.cascade import (
-    VERDICT_CANDIDATE, VERDICT_CONFIRMED, VERDICT_LIKELY, CascadeConfig,
-    MatchDecision, rank_candidates,
+    VERDICT_CANDIDATE, VERDICT_CONFIRMED, VERDICT_LIKELY, VERDICT_REJECTED,
+    CascadeConfig, MatchDecision, rank_candidates,
 )
 from reasoning.corroboration import (
     CorroborationState, apply_decision, apply_operator_confirmation,
@@ -77,6 +77,9 @@ class FleetTracker:
         self._graph = graph
         self._cascade_config = cascade_config
         self._targets: dict[str, TrackedTarget] = {}
+        # target_id -> what the cascade has concluded about it so far. Lets the
+        # console distinguish "examined and rejected" from "never looked at".
+        self._attention: dict[str, dict] = {}
         self._reviews: dict[str, PendingReview] = {}
         self._review_seq = itertools.count(1)
 
@@ -109,6 +112,47 @@ class FleetTracker:
 
     # -------------------------------------------------------- observations
 
+    def _record_attention(self, ranked) -> None:
+        """Remember what the cascade concluded about EVERY target, not just
+        the winner.
+
+        `rank_candidates` already evaluates each flagged target against each
+        observation and returns all of it in `all_decisions`; only `best` was
+        ever used and the rest was dropped. That made two very different
+        situations indistinguishable from the operator's seat: a target the
+        system has been examining and rejecting every time, and a target
+        nothing has ever been compared against. Both showed an empty queue and
+        a belief of zero.
+
+        For a system whose whole claim is that it refuses rather than guesses,
+        being unable to say "I looked at 47 sightings and none of them was
+        this car" is the wrong silence. This is what makes that sayable.
+        """
+        for d in getattr(ranked, "all_decisions", ()) or ():
+            a = self._attention.setdefault(d.target_id, {
+                "considered": 0, "best_score": 0.0, "last_verdict": "",
+                "vetoed": 0, "last_veto": "", "reviews": 0, "associations": 0,
+                "undecided": 0,
+            })
+            a["considered"] += 1
+            a["best_score"] = max(a["best_score"], round(d.score, 3))
+            a["last_verdict"] = d.verdict
+            veto = next((f.text for f in d.facts if f.kind == "veto"), "")
+            if veto:
+                a["vetoed"] += 1
+                a["last_veto"] = veto
+            if d.requires_review:
+                a["reviews"] += 1
+            elif d.verdict in (VERDICT_CONFIRMED, VERDICT_LIKELY):
+                # Only verdicts that actually associate count as a match.
+                # "undecided" is the cascade declining to conclude, which is
+                # the single most common outcome and the whole reason this
+                # record exists — counting it as a match would turn 45 refusals
+                # into "45 matched" and restate the silence as success.
+                a["associations"] += 1
+            else:
+                a["undecided"] = a.get("undecided", 0) + 1
+
     def process_observation(self, obs: Observation) -> list[TrackerEvent]:
         if not self._targets:
             return []
@@ -116,6 +160,7 @@ class FleetTracker:
             obs, [t.profile for t in self._targets.values()],
             self._graph, self._cascade_config,
         )
+        self._record_attention(ranked)
         best = ranked.best
         events: list[TrackerEvent] = []
 
@@ -328,5 +373,13 @@ class FleetTracker:
                      "timestamp_s": t.profile.last_seen.timestamp_s}
                     if t.profile.last_seen else None),
                 "next_cameras": predictions,
+                # What the cascade has actually done about this target. An
+                # empty queue means one of two very different things and the
+                # operator is entitled to know which.
+                "attention": dict(self._attention.get(target_id, {
+                    "considered": 0, "best_score": 0.0, "last_verdict": "",
+                    "vetoed": 0, "last_veto": "", "reviews": 0,
+                    "associations": 0, "undecided": 0,
+                })),
             }
         return out
