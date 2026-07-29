@@ -371,12 +371,25 @@ async function initCityflowVehicleBrowser() {
   buildScenarioSelect(scenarios, scenario);
   setBrowseStatus(`building the vehicle index for ${scenario} — this decodes
     three frames per vehicle out of the footage and takes a few moments.`);
-  // Retry rather than give up. An empty result here used to end the function,
-  // leaving the synthetic flag form in place for the rest of the session.
+  // Retry rather than give up: an empty result used to end the function and
+  // leave the synthetic flag form in place for the rest of the session.
+  //
+  // The server answers 503 immediately while it builds, instead of blocking,
+  // so these polls are cheap. That matters — when the endpoint blocked, this
+  // loop started a fresh concurrent build on every pass and took the whole API
+  // down with it. Back off anyway, because a cold build on a large scenario is
+  // a minute of work and there is nothing to gain by asking often.
   let all = [];
-  for (let attempt = 0; attempt < 40 && !all.length; attempt++) {
+  let waited = 0;
+  for (let attempt = 0; attempt < 60 && !all.length; attempt++) {
     all = await api(`/api/cityflow/${scenario}/vehicles`).catch(() => []);
-    if (!all.length) await new Promise((r) => setTimeout(r, 1500));
+    if (all.length) break;
+    const delay = Math.min(4000, 1000 + attempt * 250);
+    waited += delay;
+    setBrowseStatus(`building the vehicle index for ${scenario} — decoding `
+      + `three frames per vehicle out of the footage `
+      + `(${Math.round(waited / 1000)}s).`);
+    await new Promise((r) => setTimeout(r, delay));
   }
   if (!all.length) {
     setBrowseStatus(`Could not load the vehicle list for ${scenario}. The

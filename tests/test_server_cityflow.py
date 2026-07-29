@@ -55,10 +55,28 @@ def test_scenarios_lists_the_active_scenario(cityflow_client):
     assert cityflow_client.get("/api/cityflow/scenarios").json() == ["S01"]
 
 
+
+def _vehicles(client, path="/api/cityflow/S01/vehicles", tries=60):
+    """Fetch the browse list, waiting out the background index build.
+
+    The endpoint answers 503 while building rather than blocking a threadpool
+    worker for the length of a video decode — see the route for why building
+    inline let a polling client take the whole API down. Tests therefore poll
+    exactly like the console does.
+    """
+    import time
+
+    for _ in range(tries):
+        resp = client.get(path)
+        if resp.status_code == 200:
+            return resp.json()
+        assert resp.status_code == 503, resp.status_code
+        time.sleep(0.1)
+    raise AssertionError("vehicle index never finished building")
+
+
 def test_vehicles_returns_real_shape_with_thumbnail(cityflow_client):
-    resp = cityflow_client.get("/api/cityflow/S01/vehicles")
-    assert resp.status_code == 200
-    vehicles = resp.json()
+    vehicles = _vehicles(cityflow_client)
     assert len(vehicles) == 1
     v = vehicles[0]
     assert set(v.keys()) == {"vehicle_id", "first_camera", "first_time_s",
@@ -84,14 +102,15 @@ def test_vehicles_can_exclude_single_camera_vehicles(cityflow_client):
     run look broken. The fixture's lone vehicle is single-camera, so the
     filtered list must come back empty rather than fall back to everything.
     """
-    unfiltered = cityflow_client.get("/api/cityflow/S01/vehicles").json()
-    filtered = cityflow_client.get(
-        "/api/cityflow/S01/vehicles?min_cameras=2").json()
+    unfiltered = _vehicles(cityflow_client)
+    filtered = _vehicles(cityflow_client,
+                         "/api/cityflow/S01/vehicles?min_cameras=2")
     assert len(unfiltered) == 1 and unfiltered[0]["n_cameras"] == 1
     assert filtered == []
     # min_cameras=1 is the unfiltered default, not a special case.
-    assert cityflow_client.get(
-        "/api/cityflow/S01/vehicles?min_cameras=1").json() == unfiltered
+    assert _vehicles(
+        cityflow_client,
+        "/api/cityflow/S01/vehicles?min_cameras=1") == unfiltered
 
 
 def test_vehicles_404_for_a_different_scenario_name(cityflow_client):
@@ -100,11 +119,40 @@ def test_vehicles_404_for_a_different_scenario_name(cityflow_client):
 
 
 def test_vehicles_cached_after_first_build(cityflow_client, monkeypatch):
-    first = cityflow_client.get("/api/cityflow/S01/vehicles").json()
+    first = _vehicles(cityflow_client)
     import server.real_feed as real_feed_module
 
     def _boom(*a, **kw):
         raise AssertionError("build_vehicle_index should not run twice")
     monkeypatch.setattr(real_feed_module, "build_vehicle_index", _boom)
-    second = cityflow_client.get("/api/cityflow/S01/vehicles").json()
+    second = _vehicles(cityflow_client)
     assert first == second
+
+
+def test_concurrent_requests_start_only_one_index_build(cityflow_client,
+                                                        monkeypatch):
+    """Polling while the index builds must not start a second build.
+
+    Regression: the endpoint used to build inline. It is a sync route, so
+    FastAPI ran it in the threadpool, and a cold build takes tens of seconds of
+    video decoding. A client polling for the list therefore started a fresh
+    concurrent build on every poll until the threadpool and the CPU were both
+    exhausted and the whole API stopped answering — the console "froze" on any
+    scenario switch whose index was not already cached.
+    """
+    import server.real_feed as real_feed_module
+
+    builds = []
+    real_build = real_feed_module.build_vehicle_index
+
+    def counting_build(scenario, camera_dirs, *a, **kw):
+        builds.append(1)
+        return real_build(scenario, camera_dirs, *a, **kw)
+
+    monkeypatch.setattr(real_feed_module, "build_vehicle_index", counting_build)
+
+    # Hammer it the way the console did, then let the single build finish.
+    for _ in range(8):
+        cityflow_client.get("/api/cityflow/S01/vehicles")
+    _vehicles(cityflow_client)
+    assert sum(builds) == 1, f"started {sum(builds)} concurrent index builds"

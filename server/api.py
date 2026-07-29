@@ -230,6 +230,10 @@ def create_app(
     state.cityflow_camera_dirs = {}
     state.cityflow_vehicle_index = None  # lazily built + cached
     state.pending_scenario = ""          # set by POST /api/cityflow/scenario
+    # Guards the browse-index build so only one ever runs; see
+    # /api/cityflow/{scenario}/vehicles for why concurrent builds are fatal.
+    state.index_lock = threading.Lock()
+    state.index_building = False
 
     def load_scenario(name: str):
         """Point the server at a different scenario: graph, cameras, index.
@@ -1154,10 +1158,38 @@ def create_app(
                 404, f"scenario {scenario!r} is not the active real-data scenario "
                      f"({state.cityflow_scenario.name if state.cityflow_scenario else 'none loaded'})")
         if state.cityflow_vehicle_index is None:
-            from server.real_feed import build_vehicle_index
+            # Never build inline. This endpoint is sync, so FastAPI runs it in
+            # the threadpool, and a cold build decodes three frames per vehicle
+            # out of 1080p video — tens of seconds holding a worker. A client
+            # polling while it waited would start a SECOND build in a second
+            # worker, and so on, until the pool and the CPU were both gone and
+            # the whole API stopped answering. Kick off exactly one build in
+            # the background and tell the caller to come back.
+            import threading
 
-            state.cityflow_vehicle_index = build_vehicle_index(
-                state.cityflow_scenario, state.cityflow_camera_dirs)
+            with state.index_lock:
+                if not state.index_building:
+                    state.index_building = True
+                    scen, cams = state.cityflow_scenario, state.cityflow_camera_dirs
+
+                    def _build():
+                        from server.real_feed import build_vehicle_index
+                        try:
+                            index = build_vehicle_index(scen, cams)
+                            # Only publish if the scenario has not changed
+                            # under us; a switch mid-build must not install the
+                            # previous scenario's vehicles.
+                            if state.cityflow_scenario is scen:
+                                state.cityflow_vehicle_index = index
+                        except Exception as exc:      # noqa: BLE001
+                            print(f"vehicle index build failed: {exc}")
+                        finally:
+                            state.index_building = False
+
+                    threading.Thread(target=_build, daemon=True,
+                                     name="vehicle-index").start()
+            raise HTTPException(
+                503, f"building the vehicle index for {scenario}; retry shortly")
         if min_cameras <= 1:
             return state.cityflow_vehicle_index
         return [v for v in state.cityflow_vehicle_index
