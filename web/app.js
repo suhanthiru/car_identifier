@@ -299,6 +299,31 @@ async function initPipelineStrip() {
   setInterval(refresh, 5000);
 }
 
+/** Switch the side panel to the real-data layout.
+ *
+ * Separate from loading the vehicles because the layout is knowable
+ * immediately (world_source says so) while the list is not. The manual flag
+ * form belongs to the synthetic world — in real mode you pick a vehicle out of
+ * the footage — so leaving it up during a slow index build showed the wrong
+ * controls for the wrong world.
+ */
+function showRealDataLayout() {
+  document.getElementById("flag-section")?.classList.add("hidden");
+  document.getElementById("cityflow-vehicles-section")?.classList.remove("hidden");
+}
+
+/** A sentence in the browse grid while there is nothing to show yet. */
+function setBrowseStatus(text) {
+  const grid = document.getElementById("cityflow-vehicles");
+  if (!grid) return;
+  const existing = grid.querySelector(".vt-empty");
+  if (!text) { if (existing) existing.remove(); return; }
+  const el = existing || document.createElement("div");
+  el.className = "vt-empty";
+  el.textContent = text;
+  if (!existing) grid.appendChild(el);
+}
+
 /** Scenario picker. Switching is a restart, so it says so before doing it. */
 function buildScenarioSelect(scenarios, active) {
   const sel = document.getElementById("cityflow-scenario-select");
@@ -326,6 +351,15 @@ function buildScenarioSelect(scenarios, active) {
 
 async function initCityflowVehicleBrowser() {
   const section = document.getElementById("cityflow-vehicles-section");
+  // Commit to the real-data layout NOW, before any request.
+  //
+  // Building the browse index means seeking and decoding three frames per
+  // vehicle out of 1080p video — ~16s for S01's 95 vehicles and longer for
+  // S02's 145 — and it is rebuilt from scratch after a scenario switch. While
+  // that ran, the panel still showed index.html's default markup: the manual
+  // flag form, which is the SYNTHETIC world's control. So every switch spent
+  // its first minute looking like the wrong application.
+  showRealDataLayout();
   const scenarios = await api("/api/cityflow/scenarios").catch(() => []);
   if (!scenarios.length) return;
   // The ACTIVE scenario, not scenarios[0]. Only one scenario is loaded at a
@@ -334,12 +368,23 @@ async function initCityflowVehicleBrowser() {
   // alphabetically first — which is every scenario except S01.
   const stats = latestStats || await api("/api/stats").catch(() => null);
   const scenario = (stats && stats.scenario) || scenarios[0];
-  const all = await api(`/api/cityflow/${scenario}/vehicles`).catch(() => []);
-  if (!all.length) return;
-  currentScenario = scenario;
   buildScenarioSelect(scenarios, scenario);
-  document.getElementById("flag-section").classList.add("hidden");
-  section.classList.remove("hidden");
+  setBrowseStatus(`building the vehicle index for ${scenario} — this decodes
+    three frames per vehicle out of the footage and takes a few moments.`);
+  // Retry rather than give up. An empty result here used to end the function,
+  // leaving the synthetic flag form in place for the rest of the session.
+  let all = [];
+  for (let attempt = 0; attempt < 40 && !all.length; attempt++) {
+    all = await api(`/api/cityflow/${scenario}/vehicles`).catch(() => []);
+    if (!all.length) await new Promise((r) => setTimeout(r, 1500));
+  }
+  if (!all.length) {
+    setBrowseStatus(`Could not load the vehicle list for ${scenario}. The
+      server may still be starting, or the scenario may have no usable footage.`);
+    return;
+  }
+  currentScenario = scenario;
+  setBrowseStatus("");
 
   // Filter on TIME, not on camera count.
   //
@@ -1188,6 +1233,13 @@ function onResetting() {
   lastVehicleKey = null;
   const grid = document.getElementById("cityflow-vehicles");
   if (grid) grid.innerHTML = "";
+  // Keep the real-data layout up across the gap. Clearing the grid without
+  // this let index.html's default markup show through, so a restart briefly
+  // presented the synthetic world's flag form.
+  if (latestStats && latestStats.world_source === "real") {
+    showRealDataLayout();
+    setBrowseStatus("restarting the replay…");
+  }
 }
 
 async function onResetDone(msg) {

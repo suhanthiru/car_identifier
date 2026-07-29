@@ -301,6 +301,18 @@ async def _supervise_feed(app, make_feed, on_idle=None) -> dict:
             state.pending_scenario = ""
             print(f"  switching scenario -> {pending}")
             state.load_scenario(pending)
+            # Build the browse index here, while the console is showing
+            # "restarting", rather than leaving the first request after the
+            # reload to pay for it. It decodes three frames per vehicle out of
+            # 1080p video (~16s for 95 vehicles) and caches to disk, so this is
+            # a one-off per scenario. In an executor because it is blocking
+            # work and the server has to keep answering during it.
+            from server.real_feed import build_vehicle_index
+
+            print("  building the browse index for the new scenario...")
+            await asyncio.get_running_loop().run_in_executor(
+                None, build_vehicle_index,
+                state.cityflow_scenario, state.cityflow_camera_dirs)
         state.reset_runtime()
         await state.manager.broadcast({
             "type": "reset_done", "run_generation": state.run_generation,
