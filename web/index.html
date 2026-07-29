@@ -115,9 +115,9 @@
           <select id="cityflow-scenario-select" class="scenario-select"
                   title="Replay a different scenario. Different cameras and footage, so this restarts the run and clears it."></select>
         </div>
-        <label class="vt-filter" title="Every vehicle here is multi-camera already, so that is not a useful filter. What varies is whether a car is still to come, and whether it is on screen long enough and travels far enough to be worth watching.">
+        <label class="vt-filter" title="Straight from the dataset's own ground truth: this vehicle left one camera and arrived at another later, with a gap in between where nothing observed it. That gap is the problem the system exists to solve. Nothing here has been run through the system — the filter describes the footage, not any result.">
           <select id="cf-mode" class="scenario-select">
-            <option value="watchable" selected>worth watching</option>
+            <option value="journeys" selected>crosses cameras with a gap</option>
             <option value="upcoming">still to come</option>
             <option value="all">all vehicles</option>
           </select>

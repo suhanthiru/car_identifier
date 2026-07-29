@@ -145,9 +145,12 @@ body {
 /* How long this car is actually on screen — the number that decides whether
    following it is rewarding or over before you have clicked. */
 .vt-watch {
-  display: inline-block; margin-left: 2px; padding: 0 3px; border-radius: 2px;
-  background: #14243a; color: #8fc0f0;
+  display: inline-block; margin-left: 4px; padding: 0 3px; border-radius: 2px;
+  background: #14243a; color: #8fc0f0; white-space: nowrap;
 }
+/* A car that never leaves anyone's view poses no re-identification problem;
+   say so plainly rather than dressing it as a lesser version of one. */
+.vt-watch-none { background: #23262b; color: var(--dim); }
 .vt-filter {
   display: flex; align-items: center; gap: 5px; cursor: pointer;
   font-size: 10px; color: var(--dim); margin: 0 0 6px;

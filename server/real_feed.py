@@ -115,10 +115,10 @@ def build_vehicle_index(
     import cv2
 
     cache = _index_cache_path(scenario.name)
-    # v3: entries gained visible_s/span_s/last_time_s. Bumped so an existing
-    # cache from before that change is rebuilt rather than served without the
-    # fields the browse panel now filters and sorts on.
-    key = f"v3:{scenario.name}:{len(scenario.spans)}:{len(camera_dirs)}"
+    # v4: entries gained `journeys` (real positive-gap camera hops from the
+    # ground truth). Bumped so an existing cache from before that change is
+    # rebuilt rather than served without the field the browse panel filters on.
+    key = f"v4:{scenario.name}:{len(scenario.spans)}:{len(camera_dirs)}"
     if use_cache and cache.is_file():
         try:
             blob = json.loads(cache.read_text())
@@ -128,10 +128,9 @@ def build_vehicle_index(
             pass  # corrupt or truncated cache: rebuild rather than fail
 
     earliest: dict[int, object] = {}
-    # How many distinct cameras saw each vehicle. A single-camera vehicle can
-    # never produce a cross-camera match, so flagging one demonstrates nothing
-    # the system is for — the browse panel uses this to default to the vehicles
-    # that can actually exercise re-identification.
+    # How many distinct cameras saw each vehicle. Kept as information only:
+    # every annotated vehicle in this dataset is multi-camera, so it filters
+    # nothing (see the journeys below for what actually separates them).
     cameras_per_vehicle: dict[int, set[str]] = {}
     passages_per_vehicle: dict[int, int] = {}
     # How watchable each vehicle is. Measured on S01: seconds-visible runs from
@@ -143,6 +142,33 @@ def build_vehicle_index(
     visible_s: dict[int, float] = {}
     first_s: dict[int, float] = {}
     last_s: dict[int, float] = {}
+    # Real cross-camera journeys, straight from the dataset's ground truth:
+    # this vehicle left one camera and arrived at another LATER, with a
+    # measurable gap in between. That gap is the whole problem the system
+    # exists for — identity across an interval where nothing was observed.
+    #
+    # Only positive gaps count. In S01 82% of consecutive camera pairs overlap
+    # in time (54 of 95 vehicles are in all five views at once), and a vehicle
+    # that never left anyone's sight poses no re-identification question at
+    # all. Deliberately computed from gt.txt alone: it is a fact about the
+    # footage, published before this system existed, so filtering on it makes
+    # no claim about what the cascade will conclude and cannot select for
+    # outcomes we already know.
+    journeys: dict[int, list[dict]] = {}
+    spans_by_vehicle: dict[int, list] = {}
+    for span in scenario.spans:
+        spans_by_vehicle.setdefault(span.vehicle_id, []).append(span)
+    for vid, spans in spans_by_vehicle.items():
+        ordered = sorted(spans, key=lambda s: s.enter_s)
+        hops = []
+        for a, b in zip(ordered, ordered[1:]):
+            gap = b.enter_s - a.exit_s
+            if a.camera_id != b.camera_id and gap > 0:
+                hops.append({"from_camera": a.camera_id, "to_camera": b.camera_id,
+                             "gap_s": round(gap, 1),
+                             "at_s": round(a.exit_s, 1)})
+        journeys[vid] = hops
+
     for span in scenario.spans:
         cur = earliest.get(span.vehicle_id)
         if cur is None or span.enter_s < cur.enter_s:
@@ -205,6 +231,7 @@ def build_vehicle_index(
             "visible_s": round(visible_s.get(vid, 0.0), 1),
             "span_s": round(last_s.get(vid, 0.0) - first_s.get(vid, 0.0), 1),
             "last_time_s": round(last_s.get(vid, 0.0), 2),
+            "journeys": journeys.get(vid, []),
         })
     for src in sources.values():
         src.close()

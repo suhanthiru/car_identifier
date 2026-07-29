@@ -91,7 +91,7 @@ def test_vehicles_returns_real_shape_with_thumbnail(cityflow_client):
     assert set(v.keys()) == {"vehicle_id", "first_camera", "first_time_s",
                              "thumbnail_b64",
                              "n_cameras", "n_passages", "cameras",
-                             "visible_s", "span_s", "last_time_s"}
+                             "visible_s", "span_s", "last_time_s", "journeys"}
     # Watchability metrics the browse panel filters and sorts on.
     assert v["visible_s"] >= 0 and v["span_s"] >= 0
     assert v["last_time_s"] >= v["first_time_s"]
@@ -167,3 +167,25 @@ def test_concurrent_requests_start_only_one_index_build(cityflow_client,
         cityflow_client.get("/api/cityflow/S01/vehicles")
     _vehicles(cityflow_client)
     assert sum(builds) == 1, f"started {sum(builds)} concurrent index builds"
+
+
+def test_journeys_come_from_ground_truth_and_need_a_real_gap(cityflow_client):
+    """`journeys` selects on the FOOTAGE, never on anything we computed.
+
+    A hop only counts when the vehicle left one camera and arrived at another
+    LATER — a positive gap, an interval where nothing observed it. That gap is
+    the re-identification problem. Vehicles simultaneously in several views
+    (54 of S01's 95) pose no such question, which is why flagging one can sit
+    there producing nothing.
+
+    Deliberately not derived from cascade output: selecting on what the system
+    concluded would be selection on the outcome, and the console would be
+    answering a question it had already rigged.
+    """
+    v = _vehicles(cityflow_client)[0]
+    assert isinstance(v["journeys"], list)
+    # The fixture's vehicle is seen at one camera only, so it cannot have one.
+    assert v["n_cameras"] == 1 and v["journeys"] == []
+    for hop in v["journeys"]:
+        assert hop["gap_s"] > 0
+        assert hop["from_camera"] != hop["to_camera"]

@@ -442,27 +442,36 @@ async function initCityflowVehicleBrowser() {
   // has already gone by: there is no future sighting left to associate, so the
   // review queue stays empty and a working system looks broken. That is a
   // function of the clock, so the list is re-filtered as it advances.
-  // "Worth watching" is measured, not guessed. On S01 seconds-visible spans
-  // 7-154s (median 20) and journey length 5-76s (median 16), so most of the
-  // list is a car that crosses one view and is gone before you can select it.
-  // The default keeps those that are still ahead AND stay on screen long
-  // enough AND actually travel, sorted longest-journey first.
-  const WATCH_MIN_VISIBLE_S = 15;
-  const WATCH_MIN_SPAN_S = 20;
+  // The default selects on a fact about the FOOTAGE, not on anything this
+  // system produced.
+  //
+  // `journeys` comes straight from gt.txt: the vehicle left one camera and
+  // arrived at another later, with a gap where nothing observed it. That gap
+  // is the re-identification problem. A car that is simultaneously in five
+  // views — 54 of S01's 95 — never poses it, which is why flagging one can sit
+  // there doing nothing.
+  //
+  // Deliberately NOT selected on what the cascade concluded. Pre-running the
+  // pipeline and showing the cars we already knew would work would be
+  // selection on the outcome, and the demo would be answering a question it
+  // had rigged. This filter makes no prediction: the system can still fail in
+  // front of you, which it has to be able to do.
+  const biggestGap = (v) => (v.journeys || []).reduce(
+    (m, j) => Math.max(m, j.gap_s || 0), 0);
   const mode = document.getElementById("cf-mode");
   const render = () => {
     const now = clockNow();
-    const how = mode ? mode.value : "watchable";
+    const how = mode ? mode.value : "journeys";
     const upcoming = (v) => (v.first_time_s || 0) >= now - 2;
     // Still worth showing while it is on screen, not only before it arrives.
     const running = (v) => (v.last_time_s || 0) > now;
     let shown = all;
     if (how === "upcoming") shown = all.filter(upcoming);
-    else if (how === "watchable") {
-      shown = all.filter((v) => running(v)
-        && (v.visible_s || 0) >= WATCH_MIN_VISIBLE_S
-        && (v.span_s || 0) >= WATCH_MIN_SPAN_S);
-      shown = shown.slice().sort((a, b) => (b.span_s || 0) - (a.span_s || 0));
+    else if (how === "journeys") {
+      shown = all.filter((v) => running(v) && (v.journeys || []).length > 0);
+      // Longest gap first: no threshold to argue about, and the clearest
+      // examples of the problem end up at the top where they are seen.
+      shown = shown.slice().sort((a, b) => biggestGap(b) - biggestGap(a));
     }
     const count = document.getElementById("cf-vehicle-count");
     if (count) {
@@ -511,9 +520,9 @@ function renderVehicleTiles(vehicles) {
     // Once the replay passes the last vehicle this list empties, and a bare
     // grid reads as a broken panel rather than an exhausted one. Say which it
     // is, and name the two ways forward.
-    grid.innerHTML = `<div class="vt-empty">Nothing left matching this filter —
-      every vehicle it wanted has already driven through. Switch to
-      <b>all vehicles</b> to browse them anyway, or <b>⟲ RESTART</b> to replay
+    grid.innerHTML = `<div class="vt-empty">No vehicles left matching this
+      filter — the ones it wanted have already driven through. Switch to
+      <b>all vehicles</b> to browse the rest, or <b>⟲ RESTART</b> to replay
       from t=0.</div>`;
     return;
   }
@@ -532,14 +541,23 @@ function renderVehicleTiles(vehicles) {
     // it is also why the transit windows collapse to their floor.
     const badge = `<span class="vt-cams${cams >= 2 ? "" : " vt-cams-single"}" `
       + `title="${escapeHtml((v.cameras || []).join(', '))}">${cams} cam${cams === 1 ? "" : "s"}</span>`;
-    // Seconds-visible is the number that decides whether following this car is
-    // rewarding or over before you have selected it, so it goes on the tile.
-    const watch = v.visible_s
-      ? `<span class="vt-watch" title="on screen for ${v.visible_s}s in total; its journey spans ${v.span_s}s">${Math.round(v.visible_s)}s</span>`
-      : "";
-    tile.innerHTML = `${img}<div class="vt-label">#${escapeHtml(String(v.vehicle_id))} · ${escapeHtml(v.first_camera)} · t+${Math.round(v.first_time_s)}s ${badge}${watch}</div>`;
-    tile.title = `Flag vehicle ${v.vehicle_id} — visible ${v.visible_s || "?"}s `
-      + `across ${cams} camera${cams === 1 ? "" : "s"}, journey spans ${v.span_s || "?"}s`;
+    // State the fact, not a score. "c002 → c004, 9.2s apart" is checkable
+    // against the dataset's own gt.txt; a rating would imply we had judged the
+    // car on something, which would imply we had run something.
+    const hops = (v.journeys || []).slice()
+      .sort((a, b) => (b.gap_s || 0) - (a.gap_s || 0));
+    const best = hops[0];
+    const watch = best
+      ? `<span class="vt-watch" title="ground truth: this vehicle left ${best.from_camera} and arrived at ${best.to_camera} ${best.gap_s}s later, unobserved in between">`
+        + `${escapeHtml(best.from_camera)}→${escapeHtml(best.to_camera)} ${best.gap_s}s</span>`
+      : `<span class="vt-watch vt-watch-none" title="never leaves a camera's view: no gap to re-identify across">no gap</span>`;
+    tile.innerHTML = `${img}<div class="vt-label">#${escapeHtml(String(v.vehicle_id))} · t+${Math.round(v.first_time_s)}s ${badge} ${watch}</div>`;
+    tile.title = best
+      ? `Flag vehicle ${v.vehicle_id} — ground truth has it leaving `
+        + `${best.from_camera} and arriving at ${best.to_camera} ${best.gap_s}s later`
+        + (hops.length > 1 ? `, ${hops.length} such hops in total` : "")
+      : `Flag vehicle ${v.vehicle_id} — seen at ${cams} cameras but never with a `
+        + `gap between them, so there is no interval to re-identify across`;
     tile.onclick = async () => {
       // Feedback and a guard. A click used to fire off a POST with no visible
       // effect anywhere near the tile, so it read as "nothing happened" and
