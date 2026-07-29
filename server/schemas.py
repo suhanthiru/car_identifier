@@ -9,17 +9,49 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from pydantic import BaseModel, Field, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 
-class FlagTargetRequest(BaseModel):
+class StrictModel(BaseModel):
+    """Request bodies that reject fields they do not recognise.
+
+    Pydantic ignores unknown keys by default, which made a mistyped or
+    misremembered request look like a success: POSTing {"action": "pause"} to
+    the feed control returned 200 and changed nothing, and flagging a target
+    with {"vehicle_id": 999, "body": "motorcycle"} returned 201 having silently
+    dropped both. A tester reported those as "pause is broken" and "invalid
+    vehicles are accepted" — reasonable conclusions from the evidence, and both
+    wrong. The API had accepted a request it did not understand and said
+    nothing.
+
+    Refusing the unknown field turns four silent misunderstandings into one
+    immediate 422 that names the offending key.
+
+    `allow_inf_nan=False` closes a denial of service. Python's json module
+    accepts the non-standard literals `Infinity` and `NaN`, and Pydantic let
+    them through a plain `float` field, so a single accepted sighting carrying
+    `timestamp_s: Infinity` set the server's clock to infinity — after which
+    /api/stats and /api/audit returned 500 forever, because neither value can
+    be serialised back to JSON. One unauthenticated POST permanently broke the
+    console for everyone until an operator reset it. NaN was the same story:
+    it silently passes `ge`/`le` bounds checks (every comparison with NaN is
+    False) and crashes downstream instead.
+    """
+
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+
+
+class FlagTargetRequest(StrictModel):
     # Stripped before the length check, so "   " is rejected rather than
     # creating a target with no readable name. min_length=1 alone accepted
     # whitespace, and the operator then had a row in the target list they
     # could not identify or tell apart from another blank one.
     label: Annotated[str, StringConstraints(strip_whitespace=True,
                                             min_length=1, max_length=120)]
-    plate: str = ""
+    # Bounded like the label. Unbounded it accepted a 5 MB plate string, which
+    # is both nonsense as a plate and a free amplifier for anything trying to
+    # exhaust memory.
+    plate: str = Field(default="", max_length=32)
     class_attrs: dict[str, str] = {}
     instance_attrs: dict[str, str] = {}
     # Optional reference photo of the vehicle being flagged (base64 PNG) —
@@ -34,13 +66,13 @@ class FlagTargetRequest(BaseModel):
     reference_gallery_b64: list[str] = []
 
 
-class PlateReadIn(BaseModel):
+class PlateReadIn(StrictModel):
     text: str
     confidence: float = Field(ge=0.0, le=1.0)
     source: str = "sim"
 
 
-class SightingReport(BaseModel):
+class SightingReport(StrictModel):
     """What an edge node reports for one vehicle passage."""
 
     event_id: str = Field(min_length=1)
@@ -63,11 +95,11 @@ class SightingReport(BaseModel):
     eval_truth_id: str = ""
 
 
-class ReviewResolution(BaseModel):
+class ReviewResolution(StrictModel):
     accept: bool
 
 
-class ProfileEditRequest(BaseModel):
+class ProfileEditRequest(StrictModel):
     """Operator-initiated profile edit (label/plate/attrs). Gated: recorded
     in profile_updates with the operator as the authority."""
 
@@ -77,7 +109,7 @@ class ProfileEditRequest(BaseModel):
     instance_attrs: dict[str, str] | None = None
 
 
-class InspectTargetIn(BaseModel):
+class InspectTargetIn(StrictModel):
     """One hand-built target profile for the reasoning sandbox."""
 
     target_id: str = Field(default="sandbox-target", min_length=1, max_length=40)
@@ -93,7 +125,7 @@ class InspectTargetIn(BaseModel):
     reid_similarity: float | None = Field(default=None, ge=-1.0, le=1.0)
 
 
-class InspectSightingIn(BaseModel):
+class InspectSightingIn(StrictModel):
     """One hand-built sighting for the reasoning sandbox."""
 
     camera_id: str = Field(min_length=1)
@@ -104,7 +136,7 @@ class InspectSightingIn(BaseModel):
     instance_attrs: dict[str, str] = {}
 
 
-class InspectRequest(BaseModel):
+class InspectRequest(StrictModel):
     """Reasoning-sandbox request: no DB, no tracker, no audit trail — just
     the cascade run on inputs a human constructed by hand. Up to 4 targets
     lets the ambiguity / candidate-set behavior be exercised directly."""
@@ -114,14 +146,14 @@ class InspectRequest(BaseModel):
     distinctiveness_floor: float | None = Field(default=None, ge=0.0, le=1.0)
 
 
-class PipelineConfigRequest(BaseModel):
+class PipelineConfigRequest(StrictModel):
     """Runtime toggle for real-clip mode's plate OCR (see K's live console).
     Only meaningful fields need be sent; omitted ones are left unchanged."""
 
     plate_ocr: bool | None = None
 
 
-class FeedControlRequest(BaseModel):
+class FeedControlRequest(StrictModel):
     """Freeze/resume the replay clock (server.feed.FeedClock). Omit the
     field to read the current state without changing it."""
 

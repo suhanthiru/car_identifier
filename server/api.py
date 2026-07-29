@@ -26,7 +26,8 @@ from pathlib import Path
 
 import numpy as np
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, Response
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from sqlmodel import Session, select
 
@@ -127,6 +128,24 @@ def create_app(
         car3d_executor.shutdown(wait=True)
 
     app = FastAPI(title="Eyes Everywhere (synthetic demo)", lifespan=_lifespan)
+
+    @app.exception_handler(RequestValidationError)
+    async def _validation_error(_request, exc: RequestValidationError):
+        """Report a rejected body as 422, even when the body cannot be echoed.
+
+        FastAPI's default handler includes the offending input in the error
+        detail. When that input is exactly what made the request invalid —
+        `Infinity`, `NaN`, a 5 MB string — serialising the explanation fails
+        and the client gets a 500, which reads as "you broke the server"
+        rather than "the server refused your input". The distinction matters:
+        one is a crash to investigate, the other is validation working.
+        """
+        safe = []
+        for err in exc.errors():
+            safe.append({"loc": [str(p) for p in err.get("loc", ())],
+                         "msg": str(err.get("msg", "invalid")),
+                         "type": str(err.get("type", "value_error"))})
+        return JSONResponse(status_code=422, content={"detail": safe})
     Path(crops_dir).mkdir(parents=True, exist_ok=True)
     if db_url.startswith("sqlite:///"):
         db_path = db_url.removeprefix("sqlite:///")
@@ -237,6 +256,10 @@ def create_app(
     # /api/cityflow/{scenario}/vehicles for why concurrent builds are fatal.
     state.index_lock = threading.Lock()
     state.index_building = False
+    # Guards the per-camera video handles; see the frame endpoint for why
+    # sharing one cv2.VideoCapture across threadpool workers is fatal.
+    state.frame_lock = threading.Lock()
+    state.frame_locks: dict[str, threading.Lock] = {}
 
     def load_scenario(name: str):
         """Point the server at a different scenario: graph, cameras, index.
@@ -252,13 +275,30 @@ def create_app(
         state.cityflow_camera_dirs = discover_camera_dirs(state.cityflow_root, name)
         state.cityflow_vehicle_index = None      # rebuilt for the new scenario
         state.footage_duration_s = 0.0
-        # Per-camera video handles belong to the old scenario's files.
-        for src in (getattr(state, "_frame_sources", None) or {}).values():
-            try:
-                src.close()
-            except Exception:                    # noqa: BLE001
-                pass
-        state._frame_sources = {}
+        # Per-camera video handles belong to the old scenario's files, and must
+        # be released under the SAME lock the frame endpoint decodes with.
+        # Releasing a cv2.VideoCapture while a threadpool worker is inside
+        # read() on it is a native crash, not an exception — the process just
+        # disappears with no traceback, which is exactly what a scenario switch
+        # did while frames were being served.
+        with state.frame_lock:
+            sources = getattr(state, "_frame_sources", None) or {}
+            locks = getattr(state, "frame_locks", None) or {}
+            for cam, src in sources.items():
+                lock = locks.get(cam)
+                if lock is not None:
+                    with lock:
+                        try:
+                            src.close()
+                        except Exception:        # noqa: BLE001
+                            pass
+                else:
+                    try:
+                        src.close()
+                    except Exception:            # noqa: BLE001
+                        pass
+            state._frame_sources = {}
+            state.frame_locks = {}
         state.graph = scen.to_road_graph()
         with Session(engine) as session:
             # store_graph merges but never deletes, so switching scenarios
@@ -1000,7 +1040,15 @@ def create_app(
         for directory in (state.crops_dir, state.targets3d_dir):
             shutil.rmtree(directory, ignore_errors=True)
             directory.mkdir(parents=True, exist_ok=True)
-        state.restart_requested = False
+        # Only clear the flag if nothing NEW asked for a restart while this one
+        # was running. Clearing unconditionally swallowed the request: two
+        # scenario switches 0.3s apart both answered 200 {"switching": true},
+        # the first won, and the second silently never happened — the API
+        # reporting success for work it had just discarded.
+        if getattr(state, "pending_scenario", ""):
+            state.restart_requested = True
+        else:
+            state.restart_requested = False
 
     state.reset_runtime = reset_runtime
 
@@ -1111,11 +1159,26 @@ def create_app(
         sources = getattr(state, "_frame_sources", None)
         if sources is None:
             sources = state._frame_sources = {}
-        src = sources.get(camera_id)
-        if src is None:
-            src = sources[camera_id] = VideoFrameSource(cam_dir / "vdo.avi")
+        # One lock per camera. This is a SYNC route, so FastAPI runs it in the
+        # threadpool and several browsers — or one impatient one — can be
+        # inside it at once. VideoFrameSource wraps a single cv2.VideoCapture
+        # and mutates its decode position; driving one handle from several
+        # threads is undefined behaviour in OpenCV and took the whole process
+        # down under 40 concurrent frame requests, which is an ordinary load
+        # for a console with five cameras and a couple of tabs open.
+        with state.frame_lock:
+            src = sources.get(camera_id)
+            if src is None:
+                src = sources[camera_id] = VideoFrameSource(cam_dir / "vdo.avi")
+            lock = state.frame_locks.setdefault(camera_id, threading.Lock())
         at = state.sim_now if t is None else t
-        img = src.frame_at(int(max(0.0, at) * DEFAULT_FPS))
+        # Bound the request before it reaches int(): t=1e308 overflowed the
+        # conversion and 500'd.
+        if not (at == at) or at in (float("inf"), float("-inf")):
+            raise HTTPException(422, "t must be a finite number")
+        at = min(max(0.0, at), 24 * 3600.0)
+        with lock:
+            img = src.frame_at(int(at * DEFAULT_FPS))
         if img is None:
             raise HTTPException(404, "no frame at that time")
         # Downscale before encoding. Source frames are 1080p and encode to
@@ -1436,8 +1499,13 @@ def create_app(
     def target_model3d_file(target_id: str, name: str):
         from car3d.profile_model import Target3DModel
 
-        base = (state.targets3d_dir / target_id / "exports").resolve()
-        path = (base / name).resolve()
+        # Same null-byte guard as /api/crops: resolve() raises rather than
+        # returning a path, and an unrepresentable name is a 404, not a 500.
+        try:
+            base = (state.targets3d_dir / target_id / "exports").resolve()
+            path = (base / name).resolve()
+        except (ValueError, OSError):
+            raise HTTPException(404, "no such model file") from None
         # Resolve traversal BEFORE generating anything, so a hostile `name`
         # cannot make us do work outside the export directory.
         if base not in path.parents:
@@ -1462,7 +1530,13 @@ def create_app(
 
     @app.get("/api/crops/{name}")
     def get_crop(name: str):
-        path = (state.crops_dir / name).resolve()
+        # resolve() raises ValueError on an embedded null byte rather than
+        # returning a path, which surfaced as a 500 on `/api/crops/x%00.jpg`.
+        # A name that cannot denote a file is simply not found.
+        try:
+            path = (state.crops_dir / name).resolve()
+        except (ValueError, OSError):
+            raise HTTPException(404, "no such crop") from None
         if state.crops_dir.resolve() not in path.parents or not path.is_file():
             raise HTTPException(404, "no such crop")
         return FileResponse(path, media_type="image/png")

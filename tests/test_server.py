@@ -411,3 +411,57 @@ def test_flag_label_rejects_whitespace_only(client):
     assert resp.status_code == 201
     tid = resp.json()["target_id"]
     assert client.get(f"/api/targets/{tid}").json()["label"] == "silver camry"
+
+
+def test_non_finite_numbers_are_refused_not_absorbed(client):
+    """A single sighting carrying Infinity used to break the console for good.
+
+    Python's json module accepts the non-standard literals `Infinity` and
+    `NaN`, and a plain `float` field let them through. `timestamp_s: Infinity`
+    then set the server clock to infinity, after which /api/stats and
+    /api/audit returned 500 forever — because neither value can be serialised
+    back to JSON — until an operator reset the run. One unauthenticated POST,
+    console permanently down for everyone.
+
+    NaN was the same story by a different route: every comparison with NaN is
+    False, so it slips through `ge`/`le` bounds and crashes downstream.
+    """
+    body = ('{"event_id":"x","camera_id":"c001","timestamp_s":%s,"lat":0,'
+            '"lon":0,"embedding":[0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1]}')
+    for literal in ("Infinity", "-Infinity", "NaN"):
+        resp = client.post("/api/sightings", content=body % literal,
+                           headers={"Content-Type": "application/json"})
+        assert resp.status_code == 422, (literal, resp.status_code)
+        # The refusal must not have poisoned anything on the way through.
+        assert client.get("/api/stats").status_code == 200
+        assert client.get("/api/audit").status_code == 200
+
+
+def test_unknown_request_fields_are_refused(client):
+    """Silently ignoring an unknown key makes a misunderstanding look like a
+    success. POSTing {"action": "pause"} returned 200 and changed nothing, so a
+    tester reasonably concluded pause was broken."""
+    assert client.post("/api/feed_control",
+                       json={"action": "pause"}).status_code == 422
+    assert client.post("/api/targets",
+                       json={"label": "x", "vehicle_id": 999}).status_code == 422
+    # The correct shapes still work.
+    assert client.post("/api/feed_control",
+                       json={"paused": True}).status_code == 200
+    assert client.post("/api/targets", json={"label": "x"}).status_code == 201
+
+
+def test_unrepresentable_filenames_are_404_not_500(client):
+    """An embedded null byte makes pathlib raise rather than return a path.
+    A name that cannot denote a file is simply not found."""
+    assert client.get("/api/crops/x%00.jpg").status_code == 404
+    assert client.get("/api/targets/t/model3d/x%00.jpg").status_code == 404
+
+
+def test_plate_is_length_bounded_like_the_label(client):
+    """Unbounded, it accepted a 5 MB plate string — nonsense as a plate and a
+    free amplifier for anything trying to exhaust memory."""
+    assert client.post("/api/targets",
+                       json={"label": "ok", "plate": "P" * 5000}).status_code == 422
+    assert client.post("/api/targets",
+                       json={"label": "ok", "plate": "ABC-1234"}).status_code == 201
