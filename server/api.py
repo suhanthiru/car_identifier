@@ -934,12 +934,18 @@ def create_app(
         # Everything the run produced. CameraRow/AdjacencyRow are deliberately
         # absent: they are the deployment's topology, not this pass's output,
         # and dropping them would leave the map with nothing to draw.
+        #
+        # Bulk DELETE rather than loading every row and deleting it one by one.
+        # A finished S01 pass leaves ~400 sightings plus audit and decision
+        # rows; round-tripping each through the ORM made the restart take
+        # visible seconds, which is most of why it felt unreliable.
+        from sqlalchemy import delete as sa_delete
+
         with Session(engine) as session:
             for model in (dbm.SightingRow, dbm.TargetRow, dbm.ProfileUpdateRow,
                           dbm.CorroborationRow, dbm.ReviewRow, dbm.AlertRow,
                           dbm.AuditRow):
-                for row in session.exec(select(model)).all():
-                    session.delete(row)
+                session.exec(sa_delete(model))
             session.commit()
         for directory in (state.crops_dir, state.targets3d_dir):
             shutil.rmtree(directory, ignore_errors=True)

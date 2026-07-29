@@ -156,6 +156,32 @@ body {
   border-radius: 4px; padding: 10px;
 }
 .vt-empty b { color: var(--text); font-weight: 600; }
+/* Click feedback. A POST with no visible effect near the tile reads as a
+   dropped click and invites a second one. */
+.vehicle-tile.flagging { opacity: .45; cursor: progress; }
+.vehicle-tile.flagged {
+  border-color: var(--confirmed); box-shadow: inset 0 0 0 1px var(--confirmed);
+}
+.vehicle-tile.flagged .vt-label::after { content: " ✓"; color: var(--confirmed); }
+.vehicle-tile.flag-failed { border-color: var(--veto); }
+
+/* Clips are clickable; say so before the click. */
+.clip-player.clip-clickable { cursor: zoom-in; }
+.clip-player.clip-clickable:hover { outline: 1px solid var(--accent); }
+
+/* Maximized-clip transport */
+.mo-controls {
+  display: flex; align-items: center; gap: 8px; padding: 6px 12px;
+  border-top: 1px solid var(--line); background: var(--panel);
+}
+.mo-controls button {
+  background: var(--panel-2); border: 1px solid var(--line); color: var(--text);
+  border-radius: 3px; width: 30px; height: 24px; cursor: pointer; font-size: 12px;
+}
+.mo-controls button:hover { border-color: var(--accent); }
+.mo-controls #clip-pos { margin-left: auto; font-size: 11px; }
+/* A finished camera is information, not an error — amber, not red. */
+.mo-note-warn { color: var(--tentative); }
 
 #flag-form { display: flex; flex-direction: column; gap: 6px; }
 #flag-form input, #flag-form select {

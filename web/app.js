@@ -125,6 +125,24 @@ async function initMap() {
 /* ------------------------------------------------------- clock and scale */
 
 let latestStats = null;
+// Single source of truth for the replay clock's paused state, owned by the
+// /api/stats poll and read by both the toolbar button and the pill.
+let feedPaused = false;
+let feedPaintButton = null;
+
+/** Paint the PLAYING/PAUSED pill from `feedPaused`.
+ *
+ * Shared by the stats poll and the toggle handler. When only the poll painted
+ * it, a click updated the button instantly and left the pill showing the old
+ * state for up to a second — two indicators disagreeing about the same fact,
+ * which is the confusion the single-source-of-truth rewrite was meant to end.
+ */
+function paintFeedPill() {
+  const speed = document.getElementById("tb-speed");
+  if (!speed) return;
+  speed.textContent = feedPaused ? "PAUSED" : "PLAYING";
+  speed.classList.toggle("pill-paused", feedPaused);
+}
 
 function fmtClock(t) {
   const s = Math.max(0, Math.round(t));
@@ -149,11 +167,15 @@ async function initClock() {
       total ? `/ ${fmtClock(total)}` : "";
     const fill = document.getElementById("tb-progress-fill");
     if (fill) fill.style.width = total ? `${Math.min(100, 100 * s.sim_now / total)}%` : "0%";
-    const speed = document.getElementById("tb-speed");
-    if (speed) {
-      speed.textContent = s.paused ? "PAUSED" : "PLAYING";
-      speed.classList.toggle("pill-paused", !!s.paused);
+    // The button is disabled only while its own POST is in flight; skip the
+    // repaint then, so a poll that started before the click cannot overwrite
+    // the state the click is still establishing.
+    const btn = document.getElementById("feed-toggle");
+    if (!btn || !btn.disabled) {
+      feedPaused = !!s.paused;
+      if (feedPaintButton) feedPaintButton(feedPaused);
     }
+    paintFeedPill();
     renderScaleStrip(s);
   };
   await tick();
@@ -191,8 +213,37 @@ async function initRestart() {
                  + "crops and 3D models from this run.")) return;
     btn.disabled = true;
     btn.textContent = "⟲ RESTARTING";
-    await api("/api/reset", { method: "POST" }).catch(() => null);
+    const before = latestStats ? latestStats.run_generation : -1;
+    const ok = await api("/api/reset", { method: "POST" }).catch(() => null);
+    if (!ok) { restartFinished("reset request failed"); return; }
+    // Watchdog. The button is re-enabled by the reset_done broadcast, but a
+    // dropped socket or a feed that dies mid-teardown would otherwise leave it
+    // disabled forever with no way back. Poll the generation counter as a
+    // second signal, and give up loudly rather than silently.
+    let waited = 0;
+    const watch = setInterval(() => {
+      waited += 500;
+      if (latestStats && latestStats.run_generation > before) {
+        clearInterval(watch);
+        restartFinished();
+      } else if (waited >= 20000) {
+        clearInterval(watch);
+        restartFinished("restart did not complete — check the server log");
+      }
+    }, 500);
   };
+}
+
+/** Put the restart button back, optionally reporting why it came back. */
+function restartFinished(problem) {
+  const btn = document.getElementById("feed-restart");
+  if (!btn) return;
+  btn.disabled = false;
+  btn.textContent = "⟲ RESTART";
+  btn.title = problem
+    ? `${problem}. Replay from t=0; clears targets, reviews, alerts, crops and 3D models.`
+    : "Replay from t=0. Clears targets, reviews, alerts, crops and 3D models.";
+  if (problem) console.warn("restart:", problem);
 }
 
 async function initFeedControl() {
@@ -203,26 +254,38 @@ async function initFeedControl() {
   const paint = (paused) => {
     btn.textContent = paused ? "▶ RESUME" : "⏸ PAUSE";
     btn.classList.toggle("paused", !!paused);
+    // Both indicators move together or they will be seen disagreeing.
+    feedPaused = !!paused;
+    paintFeedPill();
   };
-  const sync = async () => {
-    const s = await api("/api/feed_control").catch(() => null);
-    if (s) paint(s.paused);
-  };
+  // One source of truth, and never the button's own label.
+  //
+  // This used to read intent out of `btn.textContent` and repaint from a
+  // second 5s poll of its own, while the 1s /api/stats poll painted the
+  // PLAYING/PAUSED pill from the same server field. Two pollers at different
+  // cadences plus an in-flight POST meant a stale response could land after a
+  // click and repaint the old state — the button then said PAUSE while the
+  // clock was frozen, or the reverse. State now comes only from `feedPaused`,
+  // which the stats poll owns, and the click sends the negation of that.
+  feedPaintButton = paint;
+  paint(feedPaused);
   btn.onclick = async () => {
-    const now = btn.textContent.includes("PAUSE");
+    const want = !feedPaused;
     btn.disabled = true;
+    paint(want);                       // optimistic: the click must feel instant
     try {
       const s = await api("/api/feed_control", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ paused: now }),
+        body: JSON.stringify({ paused: want }),
       });
-      paint(s.paused);
+      feedPaused = !!s.paused;         // reconcile against what the server did
+    } catch (e) {
+      feedPaused = !want;              // request failed: the clock never changed
     } finally {
+      paint(feedPaused);
       btn.disabled = false;
     }
   };
-  await sync();
-  setInterval(sync, 5000);
 }
 
 async function initPipelineStrip() {
@@ -270,17 +333,43 @@ async function initCityflowVehicleBrowser() {
         ? `${shown.length} of ${all.length} still to come`
         : `all ${all.length} vehicles`;
     }
+    // Only rebuild when the visible SET changes. Re-rendering unconditionally
+    // every few seconds tore down and recreated every tile under the cursor,
+    // so a click that landed mid-rebuild hit a node that was already detached
+    // and silently did nothing — which is why flagging a car felt unreliable.
+    const key = shown.map((v) => v.vehicle_id).join(",");
+    if (key === lastVehicleKey) return;
+    lastVehicleKey = key;
     renderVehicleTiles(shown);
   };
-  if (toggle) toggle.onchange = render;
+  if (toggle) toggle.onchange = () => { lastVehicleKey = null; render(); };
   render();
-  // Cheap enough to redo on the clock's cadence; keeps "still to come" true.
+  // Keeps "still to come" true as the clock advances; now a no-op unless the
+  // set actually changed.
   setInterval(render, 3000);
 }
 
+// vehicle_id -> tile element, so a refresh can reconcile instead of rebuild.
+const vehicleTiles = new Map();
+
+/** Reconcile the browse grid: add what is new, remove what is gone, and leave
+ * everything else's DOM node exactly where it is.
+ *
+ * The grid used to be cleared and rebuilt on every refresh. With the "still to
+ * come" filter the visible set changes every few seconds as the clock passes
+ * vehicles, so tiles were being destroyed and recreated constantly — a click
+ * landing in that window hit a detached node and did nothing, which is why
+ * flagging a car felt unreliable rather than merely slow. Preserving nodes also
+ * preserves their flagged/✓ state for free.
+ */
 function renderVehicleTiles(vehicles) {
   const grid = document.getElementById("cityflow-vehicles");
-  grid.innerHTML = "";
+  const wanted = new Set(vehicles.map((v) => String(v.vehicle_id)));
+  vehicleTiles.forEach((el, id) => {
+    if (!wanted.has(id)) { el.remove(); vehicleTiles.delete(id); }
+  });
+  const empty = grid.querySelector(".vt-empty");
+  if (empty) empty.remove();
   if (!vehicles.length) {
     // Once the replay passes the last vehicle this list empties, and a bare
     // grid reads as a broken panel rather than an exhausted one. Say which it
@@ -291,8 +380,10 @@ function renderVehicleTiles(vehicles) {
     return;
   }
   vehicles.forEach((v) => {
+    if (vehicleTiles.has(String(v.vehicle_id))) return;   // already on screen
     const tile = document.createElement("div");
     tile.className = "vehicle-tile";
+    vehicleTiles.set(String(v.vehicle_id), tile);
     const img = v.thumbnail_b64
       ? `<img src="data:image/png;base64,${v.thumbnail_b64}" alt="vehicle ${v.vehicle_id}">`
       : `<div class="no-crop">no thumbnail</div>`;
@@ -304,7 +395,24 @@ function renderVehicleTiles(vehicles) {
     const badge = `<span class="vt-cams${cams >= 2 ? "" : " vt-cams-single"}" `
       + `title="${escapeHtml((v.cameras || []).join(', '))}">${cams} cam${cams === 1 ? "" : "s"}</span>`;
     tile.innerHTML = `${img}<div class="vt-label">#${escapeHtml(String(v.vehicle_id))} · ${escapeHtml(v.first_camera)} · t+${Math.round(v.first_time_s)}s ${badge}</div>`;
-    tile.onclick = () => flagCityflowVehicle(v);
+    tile.title = `Flag vehicle ${v.vehicle_id} as a target`;
+    tile.onclick = async () => {
+      // Feedback and a guard. A click used to fire off a POST with no visible
+      // effect anywhere near the tile, so it read as "nothing happened" and
+      // invited a second click — which flagged the same car twice.
+      if (tile.classList.contains("flagging")) return;
+      tile.classList.add("flagging");
+      try {
+        await flagCityflowVehicle(v);
+        tile.classList.remove("flagging");
+        tile.classList.add("flagged");
+        tile.title = `Flagged vehicle ${v.vehicle_id} — see TARGETS below`;
+      } catch (e) {
+        tile.classList.remove("flagging");
+        tile.classList.add("flag-failed");
+        tile.title = `Could not flag vehicle ${v.vehicle_id}: ${e.message}`;
+      }
+    };
     grid.appendChild(tile);
   });
 }
@@ -356,12 +464,20 @@ function openCameraView(cameraId) {
   // Say that, rather than leaving a broken image and letting it read as a
   // failure of the system.
   img.onerror = () => {
-    img.removeAttribute("src");
+    // Hide the element, not just its src: an <img> with no source still
+    // renders the browser's broken-image glyph and its alt text, which is how
+    // "this camera has finished" ended up looking like a crash.
+    img.style.display = "none";
+    note.classList.add("mo-note-warn");
     note.textContent = `No frame from ${cameraId} at this point in the replay — `
       + "this camera's footage has ended. Other cameras may still be running; "
       + "the scenario clock spans the longest of them.";
   };
-  img.onload = () => { note.textContent = baseNote; };
+  img.onload = () => {
+    img.style.display = "";
+    note.classList.remove("mo-note-warn");
+    note.textContent = baseNote;
+  };
   const tick = () => {
     const t = latestStats ? latestStats.sim_now : 0;
     img.src = `/api/cityflow/camera/${encodeURIComponent(cameraId)}/frame.jpg?t=${t.toFixed(2)}`;
@@ -380,10 +496,21 @@ function closeOverlay(id) {
   const el = document.getElementById(id);
   if (el) el.classList.add("hidden");
   if (id === "camera-view") { clearInterval(cameraViewTimer); cameraViewTimer = null; }
-  if (id === "clip-view") { clearInterval(clipViewTimer); clipViewTimer = null; }
+  if (id === "clip-view") {
+    clearInterval(clipViewTimer);
+    clipViewTimer = null;
+    if (clipKeyHandler) {
+      document.removeEventListener("keydown", clipKeyHandler);
+      clipKeyHandler = null;
+    }
+  }
 }
 
 let clipViewTimer = null;
+let clipKeyHandler = null;   // detached on close so it cannot outlive the view
+// Ids currently on screen in the browse grid, so a periodic refresh only
+// rebuilds when the set really changed (see initCityflowVehicleBrowser).
+let lastVehicleKey = null;
 
 /** The flagged vehicle's own recorded passage, over the whole map.
  *
@@ -402,11 +529,48 @@ function openClipView(targetId, label, frames) {
   document.getElementById("clip-note").textContent =
     "The sighting the tracker associated to this target, as recorded.";
   box.classList.remove("hidden");
+  frames.forEach((src) => { const pre = new Image(); pre.src = src; });
+
+  // Playable rather than merely looping. Six frames at ~8fps is under a second,
+  // which is too fast to actually study a vehicle — so the maximized view gets
+  // a transport: pause on a frame, step through it, resume.
   let i = 0;
-  const tick = () => { img.src = frames[i % frames.length]; i += 1; };
-  tick();
-  clearInterval(clipViewTimer);
-  clipViewTimer = setInterval(tick, CLIP_FRAME_MS);
+  let playing = true;
+  const pos = document.getElementById("clip-pos");
+  const playBtn = document.getElementById("clip-play");
+  const show = () => {
+    i = ((i % frames.length) + frames.length) % frames.length;
+    img.src = frames[i];
+    if (pos) pos.textContent = `${i + 1} / ${frames.length}`;
+  };
+  const setPlaying = (on) => {
+    playing = on;
+    if (playBtn) { playBtn.textContent = on ? "⏸" : "▶"; }
+    clearInterval(clipViewTimer);
+    clipViewTimer = on
+      ? setInterval(() => { i += 1; show(); }, CLIP_FRAME_MS * 2)
+      : null;
+  };
+  const step = (by) => { setPlaying(false); i += by; show(); };
+  if (playBtn) playBtn.onclick = () => setPlaying(!playing);
+  const prev = document.getElementById("clip-prev");
+  const next = document.getElementById("clip-next");
+  if (prev) prev.onclick = () => step(-1);
+  if (next) next.onclick = () => step(1);
+  // Clicking the image itself is the obvious gesture for pause; keyboard is
+  // there because stepping frame by frame with arrows is how anyone actually
+  // examines a passage.
+  img.onclick = () => setPlaying(!playing);
+  clipKeyHandler = (ev) => {
+    if (box.classList.contains("hidden")) return;
+    if (ev.key === "ArrowLeft") step(-1);
+    else if (ev.key === "ArrowRight") step(1);
+    else if (ev.key === " ") { ev.preventDefault(); setPlaying(!playing); }
+    else if (ev.key === "Escape") closeOverlay("clip-view");
+  };
+  document.addEventListener("keydown", clipKeyHandler);
+  show();
+  setPlaying(true);
 }
 
 async function initTimeline() {
@@ -560,11 +724,12 @@ function renderTargetList(targets) {
 const activeClips = [];   // { el, timer } for cleanup across re-renders
 
 function clipPlayerHtml(frames, opts) {
-  const { still = "", label = "", empty = "no clip yet" } = opts || {};
+  const { still = "", label = "", empty = "no clip yet", id = "" } = opts || {};
   const list = (frames && frames.length) ? frames : (still ? [still] : []);
   if (!list.length) return `<div class="clip-player empty">${escapeHtml(empty)}</div>`;
   const lbl = label ? `<span class="clip-label">${escapeHtml(label)}</span>` : "";
-  return `<div class="clip-player" data-frames='${JSON.stringify(list)}'>
+  return `<div class="clip-player" data-frames='${JSON.stringify(list)}'
+    data-clip-id="${escapeHtml(id)}" data-clip-label="${escapeHtml(label)}">
     <img src="${list[0]}" alt="${escapeHtml(label || "sighting clip")}">${lbl}</div>`;
 }
 
@@ -580,7 +745,18 @@ function attachClipPlayers(root) {
     let frames;
     try { frames = JSON.parse(el.getAttribute("data-frames")); } catch (e) { return; }
     const img = el.querySelector("img");
-    if (!img || !frames || frames.length < 2) return;   // single frame = static
+    if (!img || !frames) return;
+    // Every clip is clickable, including a single-frame one — the thumbnail is
+    // ~90px wide and the whole point of the maximized view is to see the car.
+    // Previously nothing here bound a click at all, so clicking a clip did
+    // nothing and looked broken.
+    el.classList.add("clip-clickable");
+    el.title = "Click to play over the map";
+    el.onclick = (ev) => {
+      ev.stopPropagation();
+      openClipView(el.dataset.clipId || "", el.dataset.clipLabel || "sighting", frames);
+    };
+    if (frames.length < 2) return;                      // single frame = static
     frames.forEach((src) => { const pre = new Image(); pre.src = src; });
     let i = 0;
     const timer = setInterval(() => {
@@ -952,8 +1128,7 @@ function onResetting() {
 }
 
 function onResetDone() {
-  const btn = document.getElementById("feed-restart");
-  if (btn) { btn.disabled = false; btn.textContent = "⟲ RESTART"; }
+  restartFinished();
   refreshReviews();
   refreshAudit();
   // The vehicle browser is keyed to the clock (it hides passages already gone
