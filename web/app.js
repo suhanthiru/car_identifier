@@ -152,8 +152,17 @@ let feedPaintButton = null;
 function paintFeedPill() {
   const speed = document.getElementById("tb-speed");
   if (!speed) return;
-  speed.textContent = feedPaused ? "PAUSED" : "PLAYING";
-  speed.classList.toggle("pill-paused", feedPaused);
+  // A finished replay parks the clock at the end with paused=false. Reported as
+  // "PLAYING" that is indistinguishable from a hang — there was no way to learn
+  // the footage had simply run out except by noticing the number stopped.
+  const done = !!(latestStats && latestStats.replay_complete);
+  speed.textContent = done ? "REPLAY ENDED" : (feedPaused ? "PAUSED" : "PLAYING");
+  speed.classList.toggle("pill-paused", feedPaused && !done);
+  speed.classList.toggle("pill-done", done);
+  speed.title = done
+    ? "The footage has run out — this is the end of the scenario, not a stall. "
+      + "Press RESTART to replay from t=0, or switch scenario."
+    : "";
 }
 
 function fmtClock(t) {
@@ -216,7 +225,16 @@ function renderScaleStrip(s) {
     cell("vehicles seen", c.vehicles_seen, "distinct ground-truth vehicles observed") +
     cell("cross-camera hops", c.cross_camera_hops, "the same vehicle appearing at a new camera") +
     cell("reviews", c.reviews_raised, "sent to a human rather than asserted") +
-    cell("refusals", c.refusals, "narrowed to a set and declined to name an individual");
+    cell("refusals", c.refusals, "narrowed to a set and declined to name an individual") +
+    // Disclose the base rate. RESULTS.md records that the live console never
+    // proposed a single cross-camera match on real data with the default
+    // backbone — a measured, expected outcome — and nothing in the running
+    // interface said so. Meanwhile the whole visual language (live map, review
+    // queue, 3D dossier) implies matches are what normally happens. Leaving
+    // that gap to the changelog is overclaiming by omission, which is the one
+    // thing this project is built not to do.
+    `<span class="ss-note" title="Measured, not guessed: the default OSNet backbone scores about 0.52 fair AUC across cameras — near chance — so it rarely clears an alerting threshold on real footage. RESULTS.md records that the live console proposed no cross-camera match at all on this data. Zero reviews is the documented expected outcome here, not a fault. The FastReID backbone retrieves far better; see the README.">`
+    + `zero reviews is expected here — why?</span>`;
 }
 
 async function initRestart() {

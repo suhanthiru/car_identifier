@@ -164,6 +164,17 @@ body {
 .attn-quiet b { color: #e0b784; }
 /* Genuinely not looked at yet — the honest other case. */
 .attn-idle { color: var(--dim); font-style: italic; }
+
+/* The replay ran out of footage. Distinct from paused, because "the tape
+   ended" and "you stopped the tape" are different facts. */
+.pill-done { background: var(--lost); color: #0b0e12; }
+/* Base-rate disclosure in the scale strip. Amber because it qualifies the
+   counters next to it rather than reporting them. */
+.ss-note {
+  margin-left: 10px; padding: 0 5px; border-radius: 2px;
+  background: #2a1e12; color: #d0a06a; cursor: help;
+  border: 1px solid #573f22;
+}
 .vt-filter {
   display: flex; align-items: center; gap: 5px; cursor: pointer;
   font-size: 10px; color: var(--dim); margin: 0 0 6px;

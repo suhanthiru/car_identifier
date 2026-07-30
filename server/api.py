@@ -207,6 +207,10 @@ def create_app(
     # Replay position for display, published by the feed. None until a
     # feed runs, so /api/stats can fall back to sim_now.
     state.replay_clock_s = None
+    # Set by the feed supervisor when a replay reaches its end. A
+    # parked clock with paused=false is otherwise indistinguishable
+    # from a hang.
+    state.replay_complete = False
     state.target_seq = itertools.count(1)
     state.enable_3d = enable_3d
     state.enable_3d_identification = enable_3d_identification
@@ -1014,6 +1018,7 @@ def create_app(
         # The next feed republishes this; leaving the old value would
         # show the previous run's position on a rewound clock.
         state.replay_clock_s = None
+        state.replay_complete = False
         state.target_seq = itertools.count(1)
         state.counters = {k: 0 for k in state.counters}
         state._seen_vehicle_keys = set()
@@ -1078,6 +1083,7 @@ def create_app(
             "clock_s": state.sim_now if replay is None else min(replay, duration or replay),
             "footage_duration_s": duration,
             "paused": state.feed_paused,
+            "replay_complete": bool(getattr(state, "replay_complete", False)),
             "world_source": state.world_source,
             "run_generation": state.run_generation,
             "scenario": scen.name if scen is not None else "",

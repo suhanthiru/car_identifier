@@ -278,20 +278,40 @@ async def _supervise_feed(app, make_feed, on_idle=None) -> dict:
         if not getattr(state, "restart_requested", False):
             if not announced:
                 announced = True
+                # The console needs to know too. A finished replay leaves the
+                # clock parked at the end with paused=false, which reads as a
+                # hang: nothing in the interface said "there is no more tape".
+                state.replay_complete = True
                 if on_idle is not None:
                     on_idle(counts)
             while not getattr(state, "restart_requested", False):
                 await asyncio.sleep(0.1)
         announced = False
+        state.replay_complete = False
         print("\n  reset requested - clearing this run and replaying from t=0\n")
-        # Let any in-flight 3D fusion finish before the directories go: the
-        # worker holds file handles under targets3d, and yanking them mid-write
-        # leaves a half-exported asset the next run would try to load.
-        executor = getattr(state, "car3d_executor", None)
-        if executor is not None:
-            await asyncio.get_running_loop().run_in_executor(
-                None, lambda: [j.cancel() for j in
-                               list(getattr(state, "car3d_jobs", {}).values())])
+        # Let any in-flight 3D fusion actually finish before the directories go.
+        #
+        # This used to call j.cancel() and move straight on, which is not what
+        # the comment claimed and not what happened: cancel() returns False for
+        # a future that has already started and does nothing to stop it. A
+        # reconstruction takes ~98s on the GPU with SF3D, so reset_runtime then
+        # deleted data/targets3d out from under a running exporter — dropping
+        # files mid-write and, twice, taking the process down with no Python
+        # traceback at all. Drop only the jobs that have not begun; wait for the
+        # ones that have.
+        jobs = list(getattr(state, "car3d_jobs", {}).values())
+        if jobs:
+            def _drain() -> None:
+                for job in jobs:
+                    if job.cancel():
+                        continue          # never started; safe to drop
+                    try:
+                        job.result(timeout=180)
+                    except Exception:     # noqa: BLE001 — already reported
+                        pass
+
+            print(f"  waiting for {len(jobs)} in-flight 3D fusion(s)...")
+            await asyncio.get_running_loop().run_in_executor(None, _drain)
         # A scenario switch is a reset with a different scenario attached: new
         # cameras, new graph, new footage, so nothing from the old run could
         # carry across meaningfully. Swap before reset_runtime so the rebuilt
