@@ -261,10 +261,29 @@ async def _edge_node(
         # hold the report rather than letting a handful of sightings land
         # after the console visibly froze. Returns immediately when running.
         await clock.wait_until(due)
-        resp = await client.post(
-            f"{cfg.base_url}/api/sightings",
-            json=observation_payload(obs, cfg.send_crops), timeout=30.0)
-        resp.raise_for_status()
+        try:
+            resp = await client.post(
+                f"{cfg.base_url}/api/sightings",
+                json=observation_payload(obs, cfg.send_crops), timeout=30.0)
+            resp.raise_for_status()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:                  # noqa: BLE001
+            # One bad sighting must not end the replay.
+            #
+            # This used to raise_for_status() straight out of the task, and the
+            # gather below had no return_exceptions, so a single failed POST —
+            # one transient 500, one dropped connection — killed every camera at
+            # once and then propagated far enough to take the process down. That
+            # is exactly how an earlier 500 ended a whole run. A camera that
+            # cannot report one passage should skip it and carry on.
+            state = getattr(perceptor, "_pipeline_state", None)
+            print(f"feed: {camera_id} could not report {obs.event_id}: "
+                  f"{type(exc).__name__}: {exc}")
+            if state is not None:
+                state.feed_errors = getattr(state, "feed_errors", 0) + 1
+                state.feed_last_error = f"{camera_id}: {type(exc).__name__}"
+            continue
         sent += 1
     return sent
 
@@ -306,9 +325,21 @@ async def run_cityflow_feed(
             publisher = asyncio.create_task(
                 _publish_clock(pipeline_state, clock, t0, cfg.time_scale))
             try:
-                results = await asyncio.gather(*(
+                # return_exceptions: one camera failing is not five cameras
+                # failing, and it is certainly not the process exiting.
+                raw = await asyncio.gather(*(
                     _edge_node(cam, passages, perceptor, client, cfg, t0, clock)
-                    for cam, passages in by_camera.items() if passages))
+                    for cam, passages in by_camera.items() if passages),
+                    return_exceptions=True)
+                results = []
+                for cam, outcome in zip(
+                        [c for c, ps in by_camera.items() if ps], raw):
+                    if isinstance(outcome, BaseException):
+                        print(f"feed: camera {cam} stopped early: "
+                              f"{type(outcome).__name__}: {outcome}")
+                        results.append(0)
+                    else:
+                        results.append(outcome)
             finally:
                 # Runs forever by design; it ends when the cameras do.
                 publisher.cancel()

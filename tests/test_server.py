@@ -465,3 +465,29 @@ def test_plate_is_length_bounded_like_the_label(client):
                        json={"label": "ok", "plate": "P" * 5000}).status_code == 422
     assert client.post("/api/targets",
                        json={"label": "ok", "plate": "ABC-1234"}).status_code == 201
+
+
+def test_profile_edit_is_bounded_like_creation(client):
+    """The edit path must not permit what the create path forbids.
+
+    ProfileEditRequest had no size limits at all, so the same 5 MB label that
+    POST /api/targets rejects with 422 was accepted by PATCH with a 200 — and
+    then carried in every target list, every dossier, and every WebSocket
+    snapshot. Two poisoned targets took the list response to ~10 MB, and since
+    the console's snapshot broadcast includes each target's full profile, a
+    client with an ordinary 1 MB frame limit is disconnected with
+    "1009 message too big" on the next broadcast: a persistent denial of
+    service against every open console, from one edit.
+    """
+    tid = client.post("/api/targets", json={"label": "victim"}).json()["target_id"]
+    for payload in ({"label": "L" * 5000},
+                    {"plate": "P" * 5000},
+                    {"class_attrs": {"K" * 5000: "v"}},
+                    {"class_attrs": {str(i): "v" for i in range(5000)}},
+                    {"instance_attrs": {"k": "V" * 5000}}):
+        resp = client.patch(f"/api/targets/{tid}", json=payload)
+        assert resp.status_code == 422, (list(payload), resp.status_code)
+    # A sane edit still works, and the listing stays small.
+    assert client.patch(f"/api/targets/{tid}",
+                        json={"label": "reasonable"}).status_code == 200
+    assert len(client.get("/api/targets").content) < 4000

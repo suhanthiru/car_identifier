@@ -12,6 +12,15 @@ from typing import Annotated
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 
+# Attribute maps carry short keys like "color" and short values like "silver".
+# Bounding the dict length alone left the door open: a single 100,000-character
+# KEY was accepted, which bloats every response that echoes the profile just as
+# effectively as a long label did.
+AttrKey = Annotated[str, StringConstraints(strip_whitespace=True, max_length=40)]
+AttrValue = Annotated[str, StringConstraints(max_length=120)]
+AttrMap = Annotated[dict[AttrKey, AttrValue], Field(max_length=32)]
+
+
 class StrictModel(BaseModel):
     """Request bodies that reject fields they do not recognise.
 
@@ -52,8 +61,8 @@ class FlagTargetRequest(StrictModel):
     # is both nonsense as a plate and a free amplifier for anything trying to
     # exhaust memory.
     plate: str = Field(default="", max_length=32)
-    class_attrs: dict[str, str] = {}
-    instance_attrs: dict[str, str] = {}
+    class_attrs: AttrMap = {}
+    instance_attrs: AttrMap = {}
     # Optional reference photo of the vehicle being flagged (base64 PNG) —
     # e.g. the CityFlow browse thumbnail the operator clicked. The server
     # seeds honestly-derived evidence from it: the pixel-color heuristic and
@@ -67,7 +76,7 @@ class FlagTargetRequest(StrictModel):
 
 
 class PlateReadIn(StrictModel):
-    text: str
+    text: str = Field(max_length=32)
     confidence: float = Field(ge=0.0, le=1.0)
     source: str = "sim"
 
@@ -75,24 +84,24 @@ class PlateReadIn(StrictModel):
 class SightingReport(StrictModel):
     """What an edge node reports for one vehicle passage."""
 
-    event_id: str = Field(min_length=1)
-    camera_id: str = Field(min_length=1)
+    event_id: str = Field(min_length=1, max_length=120)
+    camera_id: str = Field(min_length=1, max_length=40)
     timestamp_s: float
     lat: float
     lon: float
     embedding: list[float] = Field(min_length=8)
     plate: PlateReadIn | None = None
-    class_attrs: dict[str, str] = {}
-    class_attrs_source: str = "heuristic"
-    instance_attrs: dict[str, str] = {}
-    detection_source: str = "sim-fallback"
+    class_attrs: AttrMap = {}
+    class_attrs_source: str = Field(default="heuristic", max_length=40)
+    instance_attrs: AttrMap = {}
+    detection_source: str = Field(default="sim-fallback", max_length=40)
     crop_png_b64: str = ""
     # Ordered base64 PNG frames of the short sighting clip (oldest first).
     # Empty when clips are disabled; the console loops them in the card.
     clip_frames_b64: list[str] = []
     # Simulator ground truth for the evaluation harness. A real edge node
     # would not send this; the serving path never reads it.
-    eval_truth_id: str = ""
+    eval_truth_id: str = Field(default="", max_length=64)
 
 
 class ReviewResolution(StrictModel):
@@ -101,12 +110,25 @@ class ReviewResolution(StrictModel):
 
 class ProfileEditRequest(StrictModel):
     """Operator-initiated profile edit (label/plate/attrs). Gated: recorded
-    in profile_updates with the operator as the authority."""
+    in profile_updates with the operator as the authority.
 
-    label: str | None = None
-    plate: str | None = None
-    class_attrs: dict[str, str] | None = None
-    instance_attrs: dict[str, str] | None = None
+    Bounded identically to FlagTargetRequest. It previously had no limits at
+    all, so the same 5 MB label that POST /api/targets rejects with a 422 was
+    accepted here with a 200 — and every target list, every dossier and every
+    WebSocket snapshot then carried it. Two poisoned targets took the list
+    response to 10 MB and 1.5s, and because the console's snapshot broadcast
+    includes each target's full profile, a client with an ordinary 1 MB frame
+    limit is disconnected with "1009 message too big" on the next broadcast.
+    An edit path that can do what the create path forbids is a hole, not a
+    convenience.
+    """
+
+    label: Annotated[str, StringConstraints(strip_whitespace=True,
+                                            min_length=1,
+                                            max_length=120)] | None = None
+    plate: str | None = Field(default=None, max_length=32)
+    class_attrs: AttrMap | None = None
+    instance_attrs: AttrMap | None = None
 
 
 class InspectTargetIn(StrictModel):
@@ -115,8 +137,8 @@ class InspectTargetIn(StrictModel):
     target_id: str = Field(default="sandbox-target", min_length=1, max_length=40)
     label: str = "Test target"
     plate: str = ""
-    class_attrs: dict[str, str] = {}
-    instance_attrs: dict[str, str] = {}
+    class_attrs: AttrMap = {}
+    instance_attrs: AttrMap = {}
     last_seen_camera_id: str = ""
     last_seen_timestamp_s: float | None = None
     # Simulated ReID similarity to the sighting below, in [-1, 1]. None = the
@@ -132,8 +154,8 @@ class InspectSightingIn(StrictModel):
     timestamp_s: float
     plate_text: str = ""
     plate_confidence: float = Field(default=0.9, ge=0.0, le=1.0)
-    class_attrs: dict[str, str] = {}
-    instance_attrs: dict[str, str] = {}
+    class_attrs: AttrMap = {}
+    instance_attrs: AttrMap = {}
 
 
 class InspectRequest(StrictModel):

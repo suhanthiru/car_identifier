@@ -211,6 +211,13 @@ def create_app(
     # parked clock with paused=false is otherwise indistinguishable
     # from a hang.
     state.replay_complete = False
+    # Feed health. A replay whose camera tasks have died looks exactly like a
+    # quiet one from the console: the clock keeps advancing (a separate task)
+    # while nothing is ingested. Surfacing the last ingest time and the error
+    # count makes "stopped working" distinguishable from "nothing happening".
+    state.last_ingest_s = 0.0
+    state.feed_errors = 0
+    state.feed_last_error = ""
     state.target_seq = itertools.count(1)
     state.enable_3d = enable_3d
     state.enable_3d_identification = enable_3d_identification
@@ -718,7 +725,17 @@ def create_app(
             class_attrs=changes.get("class_attrs", dict(profile.class_attrs)),
             instance_attrs=changes.get("instance_attrs", dict(profile.instance_attrs)),
             version=profile.version + 1)
-        state.tracker.replace_profile(target_id, profile)
+        # Under the tracker lock. Sighting ingest, review resolution and reset
+        # all take it; the edit and delete paths did not, so they mutated
+        # `_targets` concurrently with them. replace_profile indexes the dict
+        # directly, so a delete landing between this handler's existence check
+        # and its write is a KeyError and a 500. An adversarial pass hammered
+        # 640 synchronised PATCH/DELETE races without triggering it — a narrow
+        # window is still a window, and the fix costs a dict swap.
+        with state.tracker_lock:
+            if target_id not in state.tracker.targets():
+                raise HTTPException(404, "unknown target")
+            state.tracker.replace_profile(target_id, profile)
         with Session(engine) as session:
             session.add(dbm.ProfileUpdateRow(
                 target_id=target_id, event_id="", version=profile.version,
@@ -738,7 +755,8 @@ def create_app(
 
     @app.delete("/api/targets/{target_id}", status_code=204)
     def unflag_target(target_id: str):
-        state.tracker.unflag_target(target_id)
+        with state.tracker_lock:
+            state.tracker.unflag_target(target_id)
         # Previously wrote nothing — an untraceable deletion. Now audited.
         with Session(engine) as session:
             audit_record(session, "operator", "unflag_target",
@@ -794,6 +812,7 @@ def create_app(
                          {"event_id": obs.event_id, "camera_id": obs.camera_id,
                           "outcomes": [e.kind for e in events]}, obs.timestamp_s)
             session.commit()
+        state.last_ingest_s = state.sim_now
         _tally(obs, events)
         await state.manager.broadcast({
             "type": "contact", "event_id": obs.event_id,
@@ -1019,6 +1038,9 @@ def create_app(
         # show the previous run's position on a rewound clock.
         state.replay_clock_s = None
         state.replay_complete = False
+        state.last_ingest_s = 0.0
+        state.feed_errors = 0
+        state.feed_last_error = ""
         state.target_seq = itertools.count(1)
         state.counters = {k: 0 for k in state.counters}
         state._seen_vehicle_keys = set()
@@ -1084,6 +1106,11 @@ def create_app(
             "footage_duration_s": duration,
             "paused": state.feed_paused,
             "replay_complete": bool(getattr(state, "replay_complete", False)),
+            "feed": {
+                "last_ingest_s": round(getattr(state, "last_ingest_s", 0.0), 2),
+                "errors": getattr(state, "feed_errors", 0),
+                "last_error": getattr(state, "feed_last_error", ""),
+            },
             "world_source": state.world_source,
             "run_generation": state.run_generation,
             "scenario": scen.name if scen is not None else "",
