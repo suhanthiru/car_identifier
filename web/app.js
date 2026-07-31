@@ -157,17 +157,55 @@ function paintFeedPill() {
   // "PLAYING" that is indistinguishable from a hang — there was no way to learn
   // the footage had simply run out except by noticing the number stopped.
   const done = !!(latestStats && latestStats.replay_complete);
-  speed.textContent = done ? "REPLAY ENDED"
-    : (feedPaused ? (replayNotStarted() ? "NOT STARTED" : "PAUSED") : "PLAYING");
-  speed.classList.toggle("pill-paused", feedPaused && !done);
-  speed.classList.toggle("pill-done", done);
-  speed.title = done
-    ? "The footage has run out — this is the end of the scenario, not a stall. "
-      + "Press RESTART to replay from t=0, or switch scenario."
-    : (feedPaused && replayNotStarted()
-      ? "The replay is waiting for you. Nothing has been ingested yet and the "
-        + "clock is at zero — press START to begin."
-      : "");
+  // A stalled feed outranks every other state. The clock is published by its
+  // own task, so when the camera tasks die it keeps ticking over frozen
+  // counters and the console reads exactly like a quiet stretch of footage.
+  const stall = feedStall();
+  speed.textContent = stall ? "FEED STALLED"
+    : done ? "REPLAY ENDED"
+      : (feedPaused ? (replayNotStarted() ? "NOT STARTED" : "PAUSED") : "PLAYING");
+  speed.classList.toggle("pill-paused", feedPaused && !done && !stall);
+  speed.classList.toggle("pill-done", done && !stall);
+  speed.classList.toggle("pill-stalled", !!stall);
+  speed.title = stall ? stall
+    : done
+      ? "The footage has run out — this is the end of the scenario, not a stall. "
+        + "Press RESTART to replay from t=0, or switch scenario."
+      : (feedPaused && replayNotStarted()
+        ? "The replay is waiting for you. Nothing has been ingested yet and the "
+          + "clock is at zero — press START to begin."
+        : "");
+}
+
+/** Is the feed dead rather than quiet? Returns an explanation, or "".
+ *
+ * /api/stats has reported `feed.last_ingest_s` and `feed.errors` since the
+ * commit that added them — and nothing in this file ever read either one, so
+ * the distinction they exist to draw was still invisible to the operator that
+ * commit claimed to have helped. The server knew; the console did not say.
+ *
+ * "Stalled" means the replay is running, is not finished, and the clock has
+ * pulled far enough ahead of the newest ingested sighting that footage is
+ * demonstrably going past unprocessed. The threshold is generous because
+ * genuinely empty stretches exist in this footage.
+ */
+const STALL_GAP_S = 25;
+function feedStall() {
+  const s = latestStats;
+  if (!s || !s.feed || feedPaused || s.replay_complete) return "";
+  const clock = s.clock_s != null ? s.clock_s : s.sim_now;
+  const last = s.feed.last_ingest_s || 0;
+  if (s.feed.errors) {
+    return `The feed has reported ${s.feed.errors} error(s). Last one: `
+      + `${s.feed.last_error || "unrecorded"}. Sightings may be missing — this `
+      + `is a fault, not a quiet stretch of footage.`;
+  }
+  if (clock - last > STALL_GAP_S) {
+    return `The clock is at ${clock.toFixed(0)}s but the newest ingested `
+      + `sighting is from ${last.toFixed(0)}s. Footage is going past without `
+      + `being processed — this is a stall, not an empty stretch.`;
+  }
+  return "";
 }
 
 /** Has the replay yet to run at all, as opposed to being paused mid-run?
@@ -194,6 +232,142 @@ function fmtClock(t) {
   return `t+${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
 }
 
+/* ------------------------------------------------ the cascade, out loud */
+
+/* Which target the reasoning panel is following. Null = none picked yet. */
+let reasoningTarget = null;
+
+function setReasoningTarget(targetId) {
+  reasoningTarget = targetId;
+  const panel = document.getElementById("reasoning-panel");
+  if (panel) panel.classList.remove("hidden");
+  refreshReasoning();
+}
+
+/** Poll the cascade's latest evaluation of the followed target.
+ *
+ * Deliberately shows the WHOLE decision, including the overwhelmingly common
+ * case where the answer is "not this car" — that outcome is the system
+ * working, and hiding it would leave only the rare matches on screen and
+ * misrepresent what this thing does. */
+async function refreshReasoning() {
+  const body = document.getElementById("reasoning-body");
+  const hint = document.getElementById("rp-hint");
+  if (!body || !reasoningTarget) return;
+  const d = await api(`/api/targets/${encodeURIComponent(reasoningTarget)}/reasoning`)
+    .catch(() => null);
+  if (!d) {
+    body.innerHTML = `<div class="rp-idle">That target no longer exists.</div>`;
+    reasoningTarget = null;
+    if (hint) hint.textContent = "select a target to follow";
+    return;
+  }
+  if (hint) {
+    hint.textContent = `${d.label || d.target_id} · belief `
+      + `${(d.belief == null ? 0 : d.belief).toFixed(2)} · ${d.state || "?"}`;
+  }
+  const a = d.attention || {};
+  const t = d.trace || {};
+  if (!t.event_id) {
+    // "Never looked at" and "looked at and rejected every time" must not
+    // render the same; this is the first of those two.
+    body.innerHTML = `<div class="rp-idle">No sighting has been compared
+      against this target yet. The cascade only runs when a camera reports a
+      vehicle while this target is flagged.</div>`;
+    return;
+  }
+  const verdictClass = t.verdict === "confirmed" ? "rp-confirmed"
+    : t.verdict === "likely" ? "rp-likely"
+      : t.verdict === "rejected" ? "rp-rejected" : "rp-undecided";
+  // Plain-language headline. "undecided" is the honest and usual answer, and
+  // saying it as a sentence beats leaving the operator to decode a token.
+  const headline = t.refused_to_individuate
+    ? "Declined to name an individual — the evidence describes a set, not a car."
+    : t.verdict === "rejected"
+      ? "Ruled this sighting out."
+      : t.verdict === "confirmed" ? "Confirmed this sighting as the target."
+        : t.verdict === "likely" ? "Thinks this is likely the target — sent for review."
+          : "Could not decide. No association made.";
+  const tierText = {
+    plate: "the plate read", attributes: "class attributes",
+    reid: "appearance (ReID, capped tiebreaker)", none: "nothing conclusive",
+  }[t.deciding_tier] || t.deciding_tier || "nothing conclusive";
+  const factRow = (f) => {
+    const cls = f.kind === "veto" ? "rf-veto"
+      : f.kind === "support" ? "rf-support"
+        : f.kind === "contradiction" ? "rf-against" : "rf-note";
+    return `<li class="${cls}"><span class="rf-check">`
+      + `${escapeHtml(f.check || f.kind)}</span> ${escapeHtml(f.text)}</li>`;
+  };
+  const facts = (t.facts || []).map(factRow).join("")
+    || `<li class="rf-note">No facts recorded for this evaluation.</li>`;
+  const cfs = (t.counterfactuals || []).map((c) =>
+    `<li><b>${escapeHtml(c.signal)}</b> — ${escapeHtml(c.text)}`
+    + (c.boundary ? ` <span class="rp-dim">(${escapeHtml(c.boundary)})</span>` : "")
+    + `</li>`).join("");
+  body.innerHTML = `
+    <div class="rp-verdict ${verdictClass}">
+      <div class="rp-head">${escapeHtml(headline)}</div>
+      <div class="rp-sub mono">${escapeHtml(t.camera_id || "?")} ·
+        ${fmtTime(t.timestamp_s || 0)} · score ${(t.score || 0).toFixed(2)} ·
+        decided on ${escapeHtml(tierText)}</div>
+    </div>
+    <div class="rp-section">
+      <div class="rp-title">WHAT IT USED</div>
+      <ul class="rp-facts">${facts}</ul>
+    </div>
+    ${cfs ? `<div class="rp-section">
+      <div class="rp-title">WHAT WOULD HAVE CHANGED ITS MIND</div>
+      <ul class="rp-cf">${cfs}</ul></div>` : ""}
+    <div class="rp-section">
+      <div class="rp-title">OVER THIS RUN</div>
+      <div class="rp-tally mono">
+        <span>${a.considered || 0} compared</span>
+        <span>${a.associations || 0} matched</span>
+        <span>${a.reviews || 0} to review</span>
+        <span>${a.undecided || 0} undecided</span>
+        <span>${a.vetoed || 0} vetoed</span>
+      </div>
+      ${a.last_veto ? `<div class="rp-veto-last">Last veto:
+        ${escapeHtml(a.last_veto)}</div>` : ""}
+      <div class="rp-dim">Distinctiveness ${(t.distinctiveness == null ? 1
+        : t.distinctiveness).toFixed(2)} — how uniquely the confirmed evidence
+        names one vehicle. ReID similarity ${(t.reid_similarity || 0).toFixed(2)},
+        which can only ever break a tie, never carry a decision.</div>
+    </div>`;
+}
+
+/* Self-heal a console showing the wrong scenario.
+ *
+ * The switch path reloads only when the reset message's scenario differs from
+ * the one the client last recorded. Switching several times in quick
+ * succession — which is exactly what someone exploring the dropdown does —
+ * let those two agree while the DOM belonged to a third scenario. One
+ * observed result: header reading S01, vehicle tiles from S04's id range, map
+ * markers on S04's cameras, the select showing S05, and the server on S01,
+ * all at once, with no in-app way back. The 20s restart watchdog did not
+ * cover it; only a manual F5 did.
+ *
+ * The server's own answer is the authority, and divergence must persist
+ * across two polls before acting so a switch legitimately in flight is not
+ * interrupted. */
+let renderedScenario = "";
+let scenarioMismatchSince = 0;
+const SCENARIO_MISMATCH_GRACE_MS = 6000;
+function reconcileScenario(s) {
+  const server = s && s.scenario;
+  if (!server || !renderedScenario || server === renderedScenario) {
+    scenarioMismatchSince = 0;
+    return;
+  }
+  if (!scenarioMismatchSince) { scenarioMismatchSince = performance.now(); return; }
+  if (performance.now() - scenarioMismatchSince < SCENARIO_MISMATCH_GRACE_MS) return;
+  // Long enough that this is not a switch in progress. Rebuilding piecemeal
+  // is what got the panels out of step with each other in the first place.
+  scenarioMismatchSince = 0;
+  location.reload();
+}
+
 /** Poll the clock and tallies once a second.
  *
  * Polled rather than pushed: these update on a fixed cadence regardless of
@@ -206,6 +380,7 @@ async function initClock() {
     const s = await api("/api/stats").catch(() => null);
     if (!s) return;
     latestStats = s;
+    reconcileScenario(s);
     document.getElementById("tb-clock").textContent = fmtClock(
       s.clock_s != null ? s.clock_s : s.sim_now);
     const total = s.footage_duration_s || 0;
@@ -489,6 +664,9 @@ async function initCityflowVehicleBrowser() {
     return;
   }
   currentScenario = scenario;
+  // What the DOM now actually depicts, which is the thing that has to be
+  // reconciled against the server — not the last value we happened to store.
+  renderedScenario = scenario;
   setBrowseStatus("");
 
   // Filter on TIME, not on camera count.
@@ -620,6 +798,8 @@ async function pollActivity() {
       vehicleActivity = a.vehicles || {};
       activityTargets = a.targets_flagged || 0;
     } catch (e) { /* transient: the next tick retries */ }
+    // Same cadence: the cascade panel is only interesting while it changes.
+    if (reasoningTarget) refreshReasoning();
   };
   await tick();
   setInterval(tick, 2000);
@@ -747,7 +927,18 @@ function renderVehicleTiles(vehicles) {
       // Feedback and a guard. A click used to fire off a POST with no visible
       // effect anywhere near the tile, so it read as "nothing happened" and
       // invited a second click — which flagged the same car twice.
+      //
+      // "flagging" alone only covered the in-flight window. Once the tile had
+      // SETTLED into "flagged", clicking it again POSTed a second identical
+      // target: one flag plus three idle re-clicks produced two identical
+      // cards in the targets panel, both matching the same sightings. A
+      // finished flag is not an invitation to flag again.
       if (tile.classList.contains("flagging")) return;
+      if (tile.classList.contains("flagged")) {
+        tile.classList.add("vt-nudge");
+        setTimeout(() => tile.classList.remove("vt-nudge"), 600);
+        return;
+      }
       tile.classList.add("flagging");
       try {
         await flagCityflowVehicle(v);
@@ -951,10 +1142,28 @@ function openClipView(targetId, label, frames) {
 }
 
 async function initTimeline() {
+  // The ACTIVE scenario, not the first one that exists. This asked for
+  // scenarios[0] — always "S01" — so on any other scenario the request 404'd
+  // ("scenario 'S01' is not active"), the .catch swallowed it, and the whole
+  // timeline panel silently stayed hidden. The widget was dead in four
+  // scenarios out of five with nothing on screen to say so.
+  const active = (latestStats && latestStats.scenario) || null;
   const scenarios = await api("/api/cityflow/scenarios").catch(() => []);
-  if (!scenarios.length) return;
-  const tl = await api(`/api/cityflow/${scenarios[0]}/timeline`).catch(() => null);
-  if (!tl || !tl.duration_s) return;
+  const name = active || scenarios[0];
+  if (!name) return;
+  const tl = await api(`/api/cityflow/${name}/timeline`).catch(() => null);
+  if (!tl || !tl.duration_s) {
+    // Say it rather than vanishing: an empty panel and a broken one looked
+    // identical, which is the failure mode this console keeps having.
+    const panel = document.getElementById("timeline-panel");
+    const lanes = document.getElementById("timeline-lanes");
+    if (panel && lanes) {
+      panel.classList.remove("hidden");
+      lanes.innerHTML = `<div class="tl-empty">No passage timeline available `
+        + `for ${escapeHtml(String(name))}.</div>`;
+    }
+    return;
+  }
   const panel = document.getElementById("timeline-panel");
   panel.classList.remove("hidden");
   const host = document.getElementById("timeline");
@@ -1121,10 +1330,15 @@ function renderTargetList(targets) {
       ${t.last_seen ? " · last seen " + escapeHtml(t.last_seen.camera_id) : " · never seen"}</span>
       <div class="meter"><div style="width:${Math.round(t.belief * 100)}%"></div></div>
       ${attentionHtml(t.attention)}`;
-    card.onclick = () => openDossier(id);
+    card.onclick = () => { setReasoningTarget(id); openDossier(id); };
     el.appendChild(card);
   });
   if (openDossierId && !targets[openDossierId]) showTargetsView();
+  // Follow the first target automatically. The panel exists to be watched
+  // while the replay runs, and requiring a click to see anything at all would
+  // leave it empty for exactly the operator who has not yet learned it is
+  // there.
+  if (!reasoningTarget && entries.length) setReasoningTarget(entries[0][0]);
 }
 
 /* ------------------------------------------------------ sighting clip player

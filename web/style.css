@@ -172,6 +172,13 @@ body {
 /* The replay ran out of footage. Distinct from paused, because "the tape
    ended" and "you stopped the tape" are different facts. */
 .pill-done { background: var(--lost); color: #0b0e12; }
+/* A dead feed must not be able to pass for a quiet one. Loudest state in the
+   toolbar, and it outranks PAUSED / ENDED / PLAYING. */
+.pill-stalled {
+  background: #7a1f1f; color: #ffe3e3; font-weight: 700;
+  animation: stallpulse 1.4s ease-in-out infinite;
+}
+@keyframes stallpulse { 50% { background: #a82a2a; } }
 /* Base-rate disclosure in the scale strip. Amber because it qualifies the
    counters next to it rather than reporting them. */
 /* A button, not a hover target: it asks a question on screen and the answer
@@ -220,6 +227,13 @@ body {
 }
 .vehicle-tile.flagged .vt-label::after { content: " ✓"; color: var(--confirmed); }
 .vehicle-tile.flag-failed { border-color: var(--veto); }
+/* Clicking an already-flagged tile used to silently create a SECOND identical
+   target. It now refuses and says so by moving, because a click that does
+   nothing and looks like nothing invites a third. */
+.vehicle-tile.vt-nudge { animation: vtnudge 0.3s ease-in-out 2; }
+@keyframes vtnudge { 25% { transform: translateX(-3px); }
+                     75% { transform: translateX(3px); } }
+.tl-empty { padding: 10px 12px; color: var(--dim); font-size: 11px; }
 
 /* Clips are clickable; say so before the click. */
 .clip-player.clip-clickable { cursor: zoom-in; }
@@ -606,3 +620,49 @@ table.dossier-table th { color: var(--dim); font-weight: 600; }
 /* Cameras are only clickable in real mode, where there is footage behind
    them; a pointer cursor in the synthetic world would promise one. */
 .cam-clickable { cursor: pointer; }
+
+/* ---------------------------------------------- the cascade, out loud
+   The identity cascade is the substance of this project, and until this panel
+   existed you could read about it and see its conclusions but never watch it
+   reason on live data. Styled so that the ordinary outcome — "could not
+   decide" — reads as a deliberate answer rather than a failure state, because
+   that is exactly what it is. */
+#reasoning-panel { margin-top: 8px; }
+#reasoning-body { padding: 8px 10px; max-height: 340px; overflow-y: auto; }
+.rp-idle { color: var(--dim); font-size: 11px; line-height: 1.55; padding: 6px 2px; }
+.rp-verdict {
+  border-left: 3px solid var(--dim); padding: 6px 9px; border-radius: 2px;
+  background: #12161c; margin-bottom: 9px;
+}
+.rp-confirmed { border-left-color: var(--confirmed); }
+.rp-likely    { border-left-color: var(--tentative); }
+.rp-rejected  { border-left-color: var(--veto); }
+.rp-undecided { border-left-color: #5b6673; }
+.rp-head { font-size: 12px; font-weight: 600; color: var(--text); }
+.rp-sub  { font-size: 10px; color: var(--dim); margin-top: 3px; }
+.rp-section { margin-bottom: 9px; }
+.rp-title {
+  font-size: 9px; letter-spacing: 0.09em; color: var(--dim);
+  border-bottom: 1px solid var(--line); padding-bottom: 3px; margin-bottom: 5px;
+}
+.rp-facts, .rp-cf { list-style: none; margin: 0; padding: 0; }
+.rp-facts li, .rp-cf li {
+  font-size: 11px; line-height: 1.5; padding: 3px 0 3px 8px;
+  border-left: 2px solid transparent; color: var(--text);
+}
+.rf-check {
+  display: inline-block; min-width: 62px; color: var(--dim);
+  font-family: Consolas, monospace; font-size: 9.5px; text-transform: uppercase;
+}
+.rf-support { border-left-color: var(--confirmed); }
+.rf-against { border-left-color: #b8862a; }
+.rf-veto    { border-left-color: var(--veto); background: #2a1416; }
+.rf-note    { border-left-color: var(--line); color: var(--dim); }
+.rp-cf li { border-left-color: #3d5a80; }
+.rp-tally { display: flex; flex-wrap: wrap; gap: 8px; font-size: 10px; color: var(--dim); }
+.rp-tally span { background: #161b22; padding: 1px 6px; border-radius: 2px; }
+.rp-veto-last {
+  margin-top: 5px; font-size: 10.5px; color: #e0a0a0;
+  background: #2a1416; padding: 4px 7px; border-radius: 2px;
+}
+.rp-dim { color: var(--dim); font-size: 10px; line-height: 1.5; margin-top: 6px; }

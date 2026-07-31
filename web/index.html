@@ -110,6 +110,25 @@
     </div>
     <div id="timeline"></div>
   </div>
+
+  <!-- The cascade, out loud.
+       The identity cascade — plate, then class attributes, then marks and
+       geometry, with ReID only as a capped tiebreaker, and plausibility able
+       to veto at any tier — is the substance of this project. Until now you
+       could read ABOUT it and see its conclusions, but the only place to
+       watch it reason was the sandbox inspector, on inputs you typed
+       yourself. Every field below was already computed for every sighting
+       against every flagged target, and then thrown away. -->
+  <div id="reasoning-panel" class="panel hidden">
+    <div class="panel-head">
+      <span>CASCADE — WHAT IT IS THINKING</span>
+      <span class="panel-hint" id="rp-hint">select a target to follow</span>
+    </div>
+    <div id="reasoning-body">
+      <div class="rp-idle">Flag a car, then pick it in TARGETS to watch the
+        cascade decide about it sighting by sighting.</div>
+    </div>
+  </div>
   </div>
 
   <div id="queue-panel" class="panel">
@@ -169,7 +188,15 @@
 </div>
 
 <div id="footer-strip">
-  <div class="fs-left"><span id="fs-chain-status" class="ok">✓</span><span id="fs-chain-text">chain intact</span></div>
+  <!-- Defaults to "not yet checked", NOT to a green tick. The banner two
+       sections up defaults the safe direction on purpose — claiming
+       "simulated" about real footage is the less dangerous way to be briefly
+       wrong — and this made the opposite choice: it asserted the audit chain
+       was intact before anything had verified it, so a reader with JS
+       disabled, or one who looked in the moment before refreshAudit()
+       resolved, was handed an unearned assurance. An integrity claim is the
+       last thing that should be true by default. -->
+  <div class="fs-left"><span id="fs-chain-status">…</span><span id="fs-chain-text">chain not yet verified</span></div>
   <button id="fs-audit-toggle" class="link-btn">Open full audit log →</button>
 </div>
 

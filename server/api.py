@@ -1448,6 +1448,32 @@ def create_app(
         return [{k: val for k, val in v.items() if k != "gallery_b64"}
                 for v in rows]
 
+    @app.get("/api/targets/{target_id}/reasoning")
+    def target_reasoning(target_id: str):
+        """The cascade's most recent evaluation of this target, in full.
+
+        The console could always say THAT the system had looked — the
+        attention tallies count comparisons, vetoes and refusals — but never
+        WHAT it thought: which tier decided, which facts supported or
+        contradicted, how close the score came, or what single change would
+        have flipped the answer. All of it was computed on every sighting and
+        discarded. For a project whose case rests on explainable refusal,
+        keeping the explanation private while it runs is the wrong silence.
+
+        Empty until a sighting has actually been compared against this target.
+        """
+        if target_id not in state.tracker.targets():
+            raise HTTPException(404, "unknown target")
+        snap = state.tracker.snapshot(state.sim_now).get(target_id, {})
+        return {
+            "target_id": target_id,
+            "trace": state.tracker.trace(target_id),
+            "attention": snap.get("attention", {}),
+            "belief": snap.get("belief"),
+            "state": snap.get("state", ""),
+            "label": snap.get("label", ""),
+        }
+
     @app.get("/api/cityflow/activity")
     def cityflow_activity():
         """What this run has actually observed and concluded, per vehicle.

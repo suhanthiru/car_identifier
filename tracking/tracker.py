@@ -83,6 +83,9 @@ class FleetTracker:
         # Verdict tallies for the single most recent observation; see
         # last_verdicts(). Per-sighting, where _attention is per-target.
         self._last_verdicts: dict[str, int] = {}
+        # target_id -> the most recent full cascade evaluation against it, so
+        # the console can show the reasoning and not just its conclusion.
+        self._traces: dict[str, dict] = {}
         self._reviews: dict[str, PendingReview] = {}
         self._review_seq = itertools.count(1)
 
@@ -115,7 +118,7 @@ class FleetTracker:
 
     # -------------------------------------------------------- observations
 
-    def _record_attention(self, ranked) -> None:
+    def _record_attention(self, ranked, obs: Observation | None = None) -> None:
         """Remember what the cascade concluded about EVERY target, not just
         the winner.
 
@@ -155,6 +158,49 @@ class FleetTracker:
                 a["associations"] += 1
             else:
                 a["undecided"] = a.get("undecided", 0) + 1
+            self._traces[d.target_id] = self._trace_of(
+                d, obs_camera=getattr(obs, "camera_id", ""),
+                timestamp_s=getattr(obs, "timestamp_s", 0.0))
+
+    @staticmethod
+    def _trace_of(d, obs_camera: str = "", timestamp_s: float = 0.0) -> dict:
+        """One cascade evaluation, flattened for display.
+
+        Every field here was already computed and then dropped on the floor.
+        The console could say THAT the cascade had looked (the attention
+        tallies) but never WHAT it thought: which tier decided, which facts
+        supported or vetoed, how close it came, or what single change would
+        have flipped it. For a project whose case rests on explainable
+        refusal, that reasoning being invisible while it runs is the wrong
+        thing to keep private.
+        """
+        return {
+            "event_id": d.event_id,
+            "camera_id": obs_camera,
+            "timestamp_s": round(timestamp_s, 2),
+            "verdict": d.verdict,
+            "score": round(d.score, 3),
+            "deciding_tier": d.deciding_tier,
+            "requires_review": bool(d.requires_review),
+            "anomaly": bool(d.anomaly),
+            "distinctiveness": round(d.distinctiveness, 3),
+            "refused_to_individuate": bool(d.refused_to_individuate),
+            "reid_similarity": round(d.reid_similarity, 3),
+            "candidate_ids": list(d.candidate_ids),
+            "facts": [{"kind": f.kind, "text": f.text, "check": f.check}
+                      for f in d.facts],
+            # The nearest single change that would have produced a different
+            # answer — the most direct statement available of what the verdict
+            # actually turned on.
+            "counterfactuals": [
+                {"signal": c.signal, "text": c.text, "boundary": c.boundary,
+                 "flipped_outcome": c.flipped_outcome}
+                for c in (d.counterfactuals or ())],
+        }
+
+    def trace(self, target_id: str) -> dict:
+        """The most recent cascade evaluation against this target, or {}."""
+        return dict(self._traces.get(target_id, {}))
 
     def last_verdicts(self) -> dict[str, int]:
         """What the cascade concluded about the observation just processed.
@@ -175,7 +221,7 @@ class FleetTracker:
             obs, [t.profile for t in self._targets.values()],
             self._graph, self._cascade_config,
         )
-        self._record_attention(ranked)
+        self._record_attention(ranked, obs)
         for d in getattr(ranked, "all_decisions", ()) or ():
             self._last_verdicts["considered"] = \
                 self._last_verdicts.get("considered", 0) + 1
