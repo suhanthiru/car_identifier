@@ -156,13 +156,32 @@ function paintFeedPill() {
   // "PLAYING" that is indistinguishable from a hang — there was no way to learn
   // the footage had simply run out except by noticing the number stopped.
   const done = !!(latestStats && latestStats.replay_complete);
-  speed.textContent = done ? "REPLAY ENDED" : (feedPaused ? "PAUSED" : "PLAYING");
+  speed.textContent = done ? "REPLAY ENDED"
+    : (feedPaused ? (replayNotStarted() ? "NOT STARTED" : "PAUSED") : "PLAYING");
   speed.classList.toggle("pill-paused", feedPaused && !done);
   speed.classList.toggle("pill-done", done);
   speed.title = done
     ? "The footage has run out — this is the end of the scenario, not a stall. "
       + "Press RESTART to replay from t=0, or switch scenario."
-    : "";
+    : (feedPaused && replayNotStarted()
+      ? "The replay is waiting for you. Nothing has been ingested yet and the "
+        + "clock is at zero — press START to begin."
+      : "");
+}
+
+/** Has the replay yet to run at all, as opposed to being paused mid-run?
+ *
+ * The console starts paused so footage is not streaming past while the browser
+ * loads. "PAUSED" and "RESUME" both imply something was already playing, which
+ * for the very first thing an operator sees is simply untrue — and the two
+ * states need different words, because one is waiting for a decision and the
+ * other is a run held mid-flight.
+ */
+function replayNotStarted() {
+  if (!latestStats || latestStats.replay_complete) return false;
+  const t = latestStats.clock_s != null ? latestStats.clock_s : latestStats.sim_now;
+  const seen = latestStats.counters ? latestStats.counters.sightings : 0;
+  return (t || 0) < 0.05 && !seen;
 }
 
 function fmtClock(t) {
@@ -302,7 +321,8 @@ async function initFeedControl() {
   // Server state, not local: the replay clock lives in the feed process, and
   // a reload or a second tab must show the truth rather than its own guess.
   const paint = (paused) => {
-    btn.textContent = paused ? "▶ RESUME" : "⏸ PAUSE";
+    btn.textContent = paused
+      ? (replayNotStarted() ? "▶ START" : "▶ RESUME") : "⏸ PAUSE";
     btn.classList.toggle("paused", !!paused);
     // Both indicators move together or they will be seen disagreeing.
     feedPaused = !!paused;

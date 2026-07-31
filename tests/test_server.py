@@ -387,15 +387,20 @@ def test_websocket_stream(client):
         assert "association" in types
 
 
-def test_feed_control_defaults_running_and_round_trips(client):
+def test_feed_control_starts_paused_and_round_trips(client):
     """Pause is server state, not a client toggle: a reload or a second tab
-    must see the real clock, not its own guess."""
-    assert client.get("/api/feed_control").json() == {"paused": False}
-    assert client.post("/api/feed_control", json={"paused": True}).json() == {"paused": True}
+    must see the real clock, not its own guess.
+
+    It starts SET. The replay waits for the operator rather than streaming
+    footage past while the browser loads and the browse index builds, which
+    meant the first thing on screen was a run already in progress.
+    """
     assert client.get("/api/feed_control").json() == {"paused": True}
-    # Omitting the field reads without mutating.
-    assert client.post("/api/feed_control", json={}).json() == {"paused": True}
     assert client.post("/api/feed_control", json={"paused": False}).json() == {"paused": False}
+    assert client.get("/api/feed_control").json() == {"paused": False}
+    # Omitting the field reads without mutating.
+    assert client.post("/api/feed_control", json={}).json() == {"paused": False}
+    assert client.post("/api/feed_control", json={"paused": True}).json() == {"paused": True}
 
 
 def test_flag_label_rejects_whitespace_only(client):

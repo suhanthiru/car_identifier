@@ -233,7 +233,14 @@ def create_app(
     # stops counting wall time while it is set -- so every camera task freezes
     # on one shared timeline and the cross-camera gaps the transit check
     # scores against survive the pause unchanged.
-    state.feed_paused = False
+    #
+    # Starts SET: the replay waits for the operator instead of running while
+    # nobody is looking. Opening the console used to mean footage had already
+    # been streaming for however long the browser took to load and the browse
+    # index took to build, so the first thing on screen was a run already in
+    # progress with sightings missed. Time only advances once someone presses
+    # play.
+    state.feed_paused = True
     # Live tallies for the console's scale strip. Kept as plain counters rather
     # than derived from the DB per poll: the point is to show the replay moving
     # once a second, and a COUNT(*) over the audit tables every second to draw a
@@ -410,19 +417,23 @@ def create_app(
     # ------------------------------------------------------------ 3d bridge
 
     def _run_fusion(target_id: str, event_id: str, reason: str,
-                    timestamp_s: float) -> None:
-        """Reconstruct one confirmed crop into a target's model. Worker thread.
+                    timestamp_s: float, crop_name: str = "") -> None:
+        """Reconstruct one crop into a target's model. Worker thread.
 
         Owns its own Session: the request's session belongs to the request's
         thread and must not be handed across. Every failure degrades to a
         console note — 3D is corroborative and must never sink ingest.
+
+        `crop_name` names the PNG under crops_dir when it is not the sighting's
+        own `{event_id}.png` — the reference photos a flag was seeded from are
+        stored under the target's name, not an event's.
         """
         import cv2
 
         from car3d.compat import InsufficientDetail
         from car3d.geometry import signature_to_attrs
 
-        crop_path = state.crops_dir / f"{event_id}.png"
+        crop_path = state.crops_dir / (crop_name or f"{event_id}.png")
         crop = cv2.imread(str(crop_path)) if crop_path.exists() else None
         if crop is None:
             return
@@ -644,6 +655,7 @@ def create_app(
                 target_id, req.label, req.plate,
                 req.class_attrs, req.instance_attrs)
             reference_crop = ""
+            ref_names: list[str] = []
             if req.reference_crop_b64:
                 try:
                     png = base64.b64decode(req.reference_crop_b64, validate=True)
@@ -655,6 +667,19 @@ def create_app(
                 profile = _seed_profile_from_photo(profile, png, extras)
                 reference_crop = f"{target_id}-ref.png"
                 (state.crops_dir / reference_crop).write_bytes(png)
+                # Keep the rest of the passage too. They are further views of
+                # the same car and are what the 3D reconstruction fuses.
+                #
+                # The console sends gallery[0] as the primary AND the whole
+                # gallery as extras, so the first crop arrives twice. Fusing a
+                # view into the model a second time costs ~21s of SF3D for no
+                # new surface, so drop the duplicate rather than ask callers to
+                # change shape.
+                ref_names = [reference_crop]
+                for i, extra in enumerate(x for x in extras if x != png):
+                    name = f"{target_id}-ref{i + 1}.png"
+                    (state.crops_dir / name).write_bytes(extra)
+                    ref_names.append(name)
             with state.tracker_lock:
                 state.tracker.flag_target(profile)
             with Session(engine) as session:
@@ -670,8 +695,24 @@ def create_app(
                               "photo_seeded": bool(req.reference_crop_b64)},
                              state.sim_now)
                 session.commit()
+            return ref_names
 
-        await asyncio.to_thread(_build_and_store)
+        ref_names = await asyncio.to_thread(_build_and_store)
+        # Start reconstructing from the operator's own reference photos.
+        #
+        # Fusion used to be reachable ONLY from a profile_update event -- the
+        # moment the cascade confirmed a cross-camera match. On real footage
+        # with the default backbone that essentially never fires (RESULTS.md:
+        # no cross-camera match was proposed at all), so the 3D panel could not
+        # populate on real data no matter how long it ran. The reconstruction
+        # is visual, not identity evidence, and a car's own passage crops are
+        # enough to build it: no match has to be believed first. Confirmed
+        # sightings still fuse in later, adding views as they arrive.
+        if state.enable_3d and ref_names:
+            for i, name in enumerate(ref_names):
+                state.car3d_jobs[target_id] = state.car3d_executor.submit(
+                    _run_fusion, target_id, f"{target_id}-ref{i}",
+                    "operator reference photo (flagged)", state.sim_now, name)
         # Tell the console immediately. The targets list is painted from the
         # snapshot broadcast, which was only ever sent on sighting ingest — so
         # flagging while the feed was paused, or after the replay had finished,
@@ -1070,7 +1111,10 @@ def create_app(
         state._seen_vehicle_keys = set()
         state._last_camera_by_vehicle = {}
         state.car3d_jobs = {}
-        state.feed_paused = False
+        # Restart lands in the same state as a fresh launch: rewound AND
+        # waiting. Resuming automatically would replay the opening seconds
+        # while the operator is still reading the cleared console.
+        state.feed_paused = True
         state.run_generation += 1
         # Everything the run produced. CameraRow/AdjacencyRow are deliberately
         # absent: they are the deployment's topology, not this pass's output,
