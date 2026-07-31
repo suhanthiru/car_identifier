@@ -458,7 +458,15 @@ function renderScaleStrip(s) {
     `<span class="ss-title">SO FAR</span>` +
     cell("sightings", c.sightings, "reported by the edge tier") +
     cell("vehicles seen", c.vehicles_seen, "distinct ground-truth vehicles observed") +
-    cell("cross-camera hops", c.cross_camera_hops, "the same vehicle appearing at a new camera") +
+    // Says "ground truth" like its sibling two lines up. This counter
+    // increments off the dataset's own vehicle id for every ingested
+    // sighting, with no flagged target and no cascade decision involved — but
+    // it sits in the SO FAR row beside reviews and refusals, which ARE system
+    // outputs, so without the qualifier it reads as something the system
+    // achieved rather than something the footage contains.
+    cell("cross-camera hops", c.cross_camera_hops,
+         "ground truth: the same vehicle appearing at a new camera. A fact "
+         + "about the footage, not a match this system proposed.") +
     cell("reviews", c.reviews_raised, "sent to a human rather than asserted") +
     cell("refusals", c.refusals, "narrowed to a set and declined to name an individual") +
     // Disclose the base rate. RESULTS.md records that the live console never
@@ -1697,7 +1705,9 @@ async function openDossier(targetId) {
     still: d.reference_crop ? `/api/crops/${d.reference_crop}` : "",
     empty: "no sighting yet" });
   const model3dPane = model3d.exists ? `
-      <div class="dossier-section-label">Reconstruction (visual only — never used as identity evidence)</div>
+      <div class="dossier-section-label">${model3d.feeds_identification
+        ? `Reconstruction — <b>feeding identification</b> (--3d-identification)`
+        : `Reconstruction (visual only — never used as identity evidence)`}</div>
       <div class="dossier-recon"><img src="${model3d.turntable}" alt="turntable with provenance overlay"></div>
       <div class="dossier-legend">
         <span><span class="sw sw-good"></span>confirmed (${Math.round(model3d.observed_fraction * 100)}% of structure)</span>

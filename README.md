@@ -138,7 +138,8 @@ the harness never substitutes synthetic numbers for missing real ones.
 ### Everything else
 
 ```
-pytest -m "not slow"                 # 298 tests, pure logic + fixtures, no datasets
+pytest -m "not slow"                 # 338 tests, pure logic + fixtures, no datasets
+pytest                               # 339, adds the one slow real-weights test
 python -m eval.run                   # regenerates RESULTS.md + figures (needs datasets)
 python start.py --mode synthetic     # force the no-dataset demo
 python start.py --mode cityflow      # force real footage; fails loudly if absent

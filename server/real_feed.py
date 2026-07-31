@@ -15,6 +15,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -255,11 +256,30 @@ def build_vehicle_index(
         src.close()
 
     if use_cache:
+        # Write to a private temp file and rename over the target.
+        #
+        # Two code paths build this index and neither knows about the other:
+        # the supervisor pre-caches a scenario after a switch, and the
+        # /vehicles endpoint builds lazily when it finds none. The endpoint's
+        # index_lock only stops IT from spawning twice. A plain write_text of
+        # a 100+ MB document is not atomic, so overlapping builders could
+        # interleave and leave a half-written file that the next start would
+        # read back as corrupt — recoverable (the reader catches
+        # JSONDecodeError and rebuilds) but it silently costs a full rebuild
+        # at exactly the moment an operator is waiting for a scenario switch.
+        # os.replace is atomic on the same filesystem, so a reader sees the
+        # old file or the new one and never a partial.
+        tmp = cache.with_suffix(f".{os.getpid()}.tmp")
         try:
             cache.parent.mkdir(parents=True, exist_ok=True)
-            cache.write_text(json.dumps({"key": key, "vehicles": out}))
+            tmp.write_text(json.dumps({"key": key, "vehicles": out}))
+            os.replace(tmp, cache)
         except OSError as exc:      # a read-only checkout must still work
             print(f"vehicle index: could not cache ({exc}); rebuilding next start")
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
     return out
 
 

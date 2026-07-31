@@ -1766,6 +1766,13 @@ def create_app(
             state.car3d_executor.submit(model.ensure_turntable, True)
         return {
             "exists": True, "enabled": state.enable_3d,
+            # Whether this reconstruction is allowed to influence identity at
+            # all. The backend gates it correctly and it is off by default,
+            # but the dossier had no way to say which mode it was in — so a
+            # reader could not tell a decorative model from one that had
+            # vetoed a match. The claim and the gate should come from the
+            # same place.
+            "feeds_identification": bool(state.enable_3d_identification),
             "observations": len(asset.observations),
             "n_splats": asset.cloud.n,
             "observed_fraction": sig.observed_fraction if sig else 0.0,
