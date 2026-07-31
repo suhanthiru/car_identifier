@@ -22,6 +22,7 @@ import dataclasses
 import itertools
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeout
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -501,18 +502,23 @@ def create_app(
                 _run_fusion, ev.target_id, ev.event_id,
                 str(ev.detail.get("reason", "gated update")), ev.timestamp_s)
 
-    def _await_fusion(target_id: str, timeout: float = 300.0) -> None:
-        """Block until this target's queued fusion settles.
+    def _await_fusion(target_id: str, timeout: float = 300.0) -> bool:
+        """Wait for this target's queued fusion to settle. True if it did.
 
-        The dossier should show settled state rather than a half-built model,
-        and it is operator-paced, so paying the wait here is right. One worker
-        means FIFO: awaiting the newest job implies the earlier ones finished.
+        One worker means FIFO: awaiting the newest job implies the earlier
+        ones finished. Callers that are serving a page must pass a SHORT
+        timeout and use the return value to say "still building" — a request
+        that blocks for minutes is indistinguishable from a hung server, and
+        the dossier awaits this before it renders anything at all.
         """
         job = state.car3d_jobs.get(target_id)
         if job is None:
-            return
+            return True
         try:
             job.result(timeout=timeout)
+            return True
+        except FuturesTimeout:
+            return False        # still running; not an error
         except Exception as exc:  # noqa: BLE001 — 3D must never sink a request
             # _run_fusion reports everything it catches, but it cannot report
             # what it never entered: an import error or a signature change at
@@ -521,6 +527,7 @@ def create_app(
             # panel for weeks. Say it here instead.
             print(f"car3d: fusion worker for {target_id} died before reporting: "
                   f"{type(exc).__name__}: {exc}")
+            return True         # settled, badly — not still building
 
     # ------------------------------------------------------------ helpers
 
@@ -1672,12 +1679,24 @@ def create_app(
         if target_id not in state.tracker.targets():
             raise HTTPException(404, "unknown target")
 
-        # Settle any queued fusion first, so the dossier never reports a
-        # target as having no model purely because the worker is mid-flight.
-        _await_fusion(target_id)
+        # Give a queued fusion a moment to settle, so the dossier does not
+        # report "no model" purely because the worker is a beat behind — but
+        # only a moment.
+        #
+        # This used to wait up to 300s. That was defensible when fusion ran
+        # only on a confirmed cross-camera match, which on real footage never
+        # happens: the wait was almost always zero. Flagging now queues a
+        # reconstruction from the operator's own reference photos, three or
+        # four crops at ~21s each, so the wait became minutes — and the
+        # dossier awaits THIS endpoint before it renders, which meant clicking
+        # a target profile appeared to do nothing at all until every fusion
+        # finished. A panel that blocks the page it lives on is worse than a
+        # panel that says "still building".
+        building = not _await_fusion(target_id, timeout=1.5)
         model = Target3DModel(target_id, state.targets3d_dir)
         if not model.exists():
-            return {"exists": False, "enabled": state.enable_3d}
+            return {"exists": False, "enabled": state.enable_3d,
+                    "building": building}
         asset = model.load()
         sig = signature_from_cloud(asset.cloud)
         # Derived artefacts are produced here rather than per fusion.

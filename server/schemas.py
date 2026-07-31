@@ -9,7 +9,13 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
+
+# Names Windows will not let an ordinary tool delete once a file has them.
+_WINDOWS_DEVICE_NAMES = frozenset(
+    ["CON", "PRN", "AUX", "NUL"]
+    + [f"COM{i}" for i in range(1, 10)]
+    + [f"LPT{i}" for i in range(1, 10)])
 
 
 # Attribute maps carry short keys like "color" and short values like "silver".
@@ -104,10 +110,21 @@ class SightingReport(StrictModel):
     # replay clock at 1e308 permanently, for every client, exactly the outage
     # the Infinity guard was written to prevent. Range is generous (about 31
     # years of footage) and still keeps the clock representable.
-    timestamp_s: float = Field(ge=0.0, le=1e9)
+    # 30 days of footage seconds. The bound was 1e9 — about the year 2033 in
+    # replay seconds — and `state.sim_now = max(sim_now, timestamp_s)` has no
+    # ceiling of its own, so one ACCEPTED sighting at the legal boundary pinned
+    # the reasoning clock there for the rest of the run. Same outage as the
+    # Infinity case, reached through a value the schema permitted.
+    timestamp_s: float = Field(ge=0.0, le=2_592_000.0)
     lat: float = Field(ge=-90.0, le=90.0)
     lon: float = Field(ge=-180.0, le=180.0)
-    embedding: list[float] = Field(min_length=8)
+    # Bounded. This had a floor and no ceiling, and the vector is normalised
+    # with numpy INSIDE the async handler rather than in a thread — so one
+    # unauthenticated POST carrying 20 million floats (~130 MB of JSON) blocked
+    # the event loop for ~20s and delayed every other request, /api/stats
+    # included, by up to 11s. Real embeddings are 512 floats at the very most;
+    # 4096 is generous and still trivially cheap.
+    embedding: list[float] = Field(min_length=8, max_length=4096)
     plate: PlateReadIn | None = None
     class_attrs: AttrMap = {}
     class_attrs_source: str = Field(default="heuristic", max_length=40)
@@ -120,6 +137,23 @@ class SightingReport(StrictModel):
     # Simulator ground truth for the evaluation harness. A real edge node
     # would not send this; the serving path never reads it.
     eval_truth_id: str = Field(default="", max_length=64)
+
+    @field_validator("event_id")
+    @classmethod
+    def _not_a_windows_device_name(cls, v: str) -> str:
+        """Reject CON, NUL, COM1 and friends — with or without an extension.
+
+        They pass an alphanumeric pattern and become real files inside the
+        crops directory. That is not a containment escape, but `del` and
+        Explorer cannot remove them without a \\\\?\\ prefix, so an operator
+        is left with a directory they cannot clean up by hand. Enforced here
+        rather than in the pattern because pydantic's regex engine has no
+        look-ahead.
+        """
+        if v.split(".", 1)[0].upper() in _WINDOWS_DEVICE_NAMES:
+            raise ValueError(
+                "event_id must not be a reserved Windows device name")
+        return v
 
 
 class ReviewResolution(StrictModel):

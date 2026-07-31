@@ -48,6 +48,55 @@ def sighting(event_id, plate=PLATE, with_crop=True):
     return body
 
 
+def settled_model3d(client, target_id, timeout_s=60.0):
+    """Poll /model3d until the queued fusion has finished, then return it.
+
+    The endpoint no longer blocks a request until fusion completes. It used to
+    wait up to 300s, which was nearly free while fusion only ran on a
+    confirmed cross-camera match — an event that never occurs on real footage.
+    Once flagging began queueing reconstructions from the operator's reference
+    photos, that wait became minutes, and because the dossier awaits this
+    endpoint before rendering, clicking a target profile did nothing visible
+    at all until every fusion finished.
+
+    So it now returns `building: true` instead of holding the connection, and
+    a caller that genuinely wants the settled state polls for it. Asserting on
+    the first response would just be racing the worker.
+    """
+    import time as _time
+
+    deadline = _time.monotonic() + timeout_s
+    while True:
+        status = client.get(f"/api/targets/{target_id}/model3d").json()
+        if status.get("exists") or not status.get("building"):
+            return status
+        if _time.monotonic() > deadline:      # pragma: no cover - CI stall
+            raise AssertionError(f"fusion never settled: {status}")
+        _time.sleep(0.1)
+
+
+def test_model3d_reports_building_rather_than_blocking(client):
+    """A slow reconstruction must never hold the profile shut.
+
+    The dossier awaits this endpoint, so an unbounded wait here is a hung
+    page. The contract is: answer promptly, and say whether a fusion is still
+    running.
+    """
+    import time as _time
+
+    target_id = client.post("/api/targets", json={
+        "label": "t", "plate": PLATE, "class_attrs": CAMRY}).json()["target_id"]
+    client.post("/api/sightings", json=sighting("evt-b1"))
+    started = _time.monotonic()
+    status = client.get(f"/api/targets/{target_id}/model3d").json()
+    elapsed = _time.monotonic() - started
+    assert elapsed < 10.0, f"model3d held the request {elapsed:.1f}s"
+    # Either it finished quickly, or it says it is still working — never a
+    # silent "no model" that the UI would render as "nothing here".
+    assert status["exists"] or status.get("building") is True
+    assert settled_model3d(client, target_id)["exists"] is True
+
+
 def test_confirmed_sighting_builds_3d_model(client):
     target_id = client.post("/api/targets", json={
         "label": "t", "plate": PLATE, "class_attrs": CAMRY}).json()["target_id"]
@@ -56,7 +105,7 @@ def test_confirmed_sighting_builds_3d_model(client):
     resp = client.post("/api/sightings", json=sighting("evt-1"))
     assert "profile_update" in resp.json()["events"]
 
-    status = client.get(f"/api/targets/{target_id}/model3d").json()
+    status = settled_model3d(client, target_id)
     assert status["exists"] is True
     assert status["observations"] == 1
     assert status["n_splats"] > 0
@@ -88,7 +137,7 @@ def test_operator_accept_fuses(client):
     client.post("/api/sightings", json=body)
     review = client.get("/api/reviews").json()[0]
     client.post(f"/api/reviews/{review['review_id']}/resolve", json={"accept": True})
-    status = client.get(f"/api/targets/{target_id}/model3d").json()
+    status = settled_model3d(client, target_id)
     assert status["exists"] is True, "operator confirmation opens the 3D gate too"
 
 
@@ -111,8 +160,9 @@ def test_pipeline_is_built_once_across_fusions(client, monkeypatch):
         "label": "t", "plate": PLATE, "class_attrs": CAMRY}).json()["target_id"]
     for i in range(3):
         client.post("/api/sightings", json=sighting(f"evt-multi-{i}"))
-        # the status endpoint settles the queued fusion before reporting
-        assert client.get(f"/api/targets/{target_id}/model3d").json()["exists"]
+        # Poll rather than assume: the endpoint answers promptly and reports
+        # `building` instead of blocking until the worker finishes.
+        assert settled_model3d(client, target_id)["exists"]
 
     assert sum(builds) == 1, f"pipeline rebuilt {sum(builds)}x across 3 fusions"
 

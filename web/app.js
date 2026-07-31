@@ -1608,8 +1608,24 @@ function showDossierView() {
 async function openDossier(targetId) {
   openDossierId = targetId;
   const d = await api(`/api/targets/${targetId}`);
+  // The 3D panel must never be able to hold the profile shut.
+  //
+  // This awaited /model3d unconditionally, and that endpoint waited for any
+  // queued reconstruction to finish. Once flagging began queueing fusions
+  // from the operator's reference photos — three or four crops at ~21s each —
+  // clicking a target profile did nothing visible for minutes: the click
+  // registered, openDossierId was set, and the panel simply never appeared.
+  // A reconstruction is a decoration on this page; the identity, the
+  // evidence and the audit trail are the page. Bounded, and a timeout just
+  // means the section renders as "still building".
   let model3d = { exists: false };
-  try { model3d = await api(`/api/targets/${targetId}/model3d`); } catch (e) { /* optional */ }
+  try {
+    model3d = await Promise.race([
+      api(`/api/targets/${targetId}/model3d`),
+      new Promise((resolve) => setTimeout(
+        () => resolve({ exists: false, building: true }), 4000)),
+    ]);
+  } catch (e) { /* optional */ }
   const live = d.live || {};
   const attrs = Object.entries(d.class_attrs).map(([k, v]) =>
     `<div class="trait-row"><span class="tk">${escapeHtml(k)}</span><span class="tv">${escapeHtml(v)}</span></div>`).join("");
@@ -1634,7 +1650,7 @@ async function openDossier(targetId) {
     still: d.reference_crop ? `/api/crops/${d.reference_crop}` : "",
     empty: "no sighting yet" });
   const model3dPane = model3d.exists ? `
-      <div class="dossier-section-label">Reconstruction (fused from confirmed sightings only)</div>
+      <div class="dossier-section-label">Reconstruction (visual only — never used as identity evidence)</div>
       <div class="dossier-recon"><img src="${model3d.turntable}" alt="turntable with provenance overlay"></div>
       <div class="dossier-legend">
         <span><span class="sw sw-good"></span>confirmed (${Math.round(model3d.observed_fraction * 100)}% of structure)</span>
@@ -1644,9 +1660,15 @@ async function openDossier(targetId) {
         ${model3d.geometry && model3d.geometry.trustworthy
           ? ` · ${escapeHtml(model3d.geometry.body_profile)}, ${escapeHtml(model3d.geometry.length_class)} (L/W ${model3d.geometry.lw_ratio})`
           : " · geometry withheld: too little confirmed structure"}`
-    : `<div class="dossier-recon-empty">3D model not reconstructed yet.
-        <span style="color:var(--dim)">Enable <code>EYES_ENABLE_3D</code> and confirm sightings to
-        build one from fused observations.</span></div>`;
+    : model3d.building
+      ? `<div class="dossier-recon-empty">Reconstructing this car in 3D from
+          your reference photos — about 20 seconds per view.
+          <span style="color:var(--dim)">Reopen this profile shortly. Nothing
+          else here waits on it.</span></div>`
+      : `<div class="dossier-recon-empty">3D model not reconstructed yet.
+          <span style="color:var(--dim)">Reconstruction starts when you flag a
+          car with reference photos, and needs <code>EYES_ENABLE_3D</code>.
+          It is a visual aid only — it never feeds an identity decision.</span></div>`;
   // The clip is 150px wide in this panel and is the most informative thing in
   // the dossier — it is the actual footage of the car. Offer it full size over
   // the map, which is the only surface big enough to be worth looking at.
