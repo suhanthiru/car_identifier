@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -82,8 +83,25 @@ def _passages_by_camera(
 THUMBNAIL_W = 160          # browse-grid tiles render around this wide
 
 
-def _index_cache_path(scenario_name: str) -> Path:
-    return Path("data/cache") / f"vehicle_index_{scenario_name.lower()}.json"
+def _index_cache_path(scenario_name: str,
+                      camera_dirs: dict[str, Path] | None = None) -> Path:
+    """Cache file for one scenario of one dataset.
+
+    The dataset root is part of the name, not just the scenario. The path is
+    relative to the process CWD, so a test fixture whose scenario is also
+    called "S01" wrote to the same file as the real S01 -- every test run
+    replaced the real 31 MB browse index with a one-vehicle fixture, and the
+    next scenario switch silently paid for a full rebuild. The key check kept
+    that correct, but correctness was never the problem: the two datasets
+    simply evicted each other forever.
+    """
+    from datasets.config import cache_dir
+
+    tag = ""
+    if camera_dirs:
+        root = str(sorted(camera_dirs.values())[0].resolve().parent)
+        tag = "_" + hashlib.sha1(root.encode("utf-8", "replace")).hexdigest()[:8]
+    return cache_dir() / f"vehicle_index_{scenario_name.lower()}{tag}.json"
 
 
 def _encode_thumbnail(crop) -> str:
@@ -114,7 +132,7 @@ def build_vehicle_index(
     """
     import cv2
 
-    cache = _index_cache_path(scenario.name)
+    cache = _index_cache_path(scenario.name, camera_dirs)
     # v4: entries gained `journeys` (real positive-gap camera hops from the
     # ground truth). Bumped so an existing cache from before that change is
     # rebuilt rather than served without the field the browse panel filters on.

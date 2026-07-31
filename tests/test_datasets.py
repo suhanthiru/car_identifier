@@ -121,6 +121,40 @@ def test_cityflow_applies_camera_timing_offsets(tmp_path):
     assert hop.elapsed_s == pytest.approx(108.0)
 
 
+def test_camera_clocks_invert_the_span_conversion(tmp_path):
+    """camera_clocks() must be the exact inverse of the span conversion.
+
+    Spans are built as `frame / fps + offset_s`, so anything showing the
+    footage behind a span has to map back with `(t - offset_s) * fps`. The
+    live camera view used a flat `t * 10` instead, which on a scenario whose
+    cameras start 100 s apart shows the wrong moment or claims the footage
+    ended while the camera is running.
+    """
+    from datasets.cityflow import camera_clocks
+
+    root = make_cityflow(tmp_path)
+    (root / "cam_timing").mkdir()
+    (root / "cam_timing" / "S01.txt").write_text("c001 0.0 10\nc002 100.0 10\n")
+    clocks = camera_clocks(root, "S01")
+    assert clocks["c001"] == (0.0, 10.0)
+    assert clocks["c002"] == (100.0, 10.0)
+
+    scen = CityFlow(root).load_scenario("S01")
+    span = next(s for s in scen.spans
+                if s.camera_id == "c002" and s.vehicle_id == 7)
+    offset_s, fps = clocks["c002"]
+    # The span says vehicle 7 enters c002 at 112.0 s of scenario time; that
+    # must land on gt.txt frame 120 of c002's own video, not frame 1120.
+    assert span.enter_s == pytest.approx(112.0)
+    assert int((span.enter_s - offset_s) * fps) == 120
+
+
+def test_camera_clocks_unknown_scenario_is_empty(tmp_path):
+    from datasets.cityflow import camera_clocks
+
+    assert camera_clocks(make_cityflow(tmp_path), "S99") == {}
+
+
 def test_homography_parser_variants():
     H = parse_homography("Homography matrix: 1 2 3;4 5 6;7 8 9")
     assert H is not None and H[2, 2] == 9

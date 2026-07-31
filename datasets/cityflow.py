@@ -358,6 +358,32 @@ def timing_offsets_found(root: Path, name: str) -> bool:
     return bool(_load_timing_offsets(scen_dir, root, name))
 
 
+def camera_clocks(root: Path, name: str,
+                  fps: float = DEFAULT_FPS) -> dict[str, tuple[float, float]]:
+    """camera_id -> (offset_s, fps): how to convert scenario seconds into a
+    frame index in that camera's own `vdo.avi`.
+
+    `_spans_from_gt` builds scenario seconds as `frame / fps + offset_s`, so
+    anything that wants to SHOW the footage behind a span has to invert the
+    same expression: `frame = (t - offset_s) * fps`. The live camera view
+    skipped the offset and assumed a flat 10 fps, which on S01 is a ~2 s error
+    nobody notices and on S04 is catastrophic: offsets there run to 40 s
+    against clips only ~30 s long, so c021 -- whose real coverage is scenario
+    40-71 s -- was asked for frame 450 of a 310-frame video at every instant
+    it was actually on screen, and reported "footage has ended" for the whole
+    replay. Where a frame did come back it was the wrong moment, shown with no
+    indication it disagreed with the sighting markers drawn beside it.
+    """
+    scen_dir = next((d for split in sorted(root.iterdir()) if split.is_dir()
+                     for d in [split / name] if d.is_dir()), None)
+    if scen_dir is None:
+        return {}
+    offsets = _load_timing_offsets(scen_dir, root, name)
+    return {cam_dir.name: (offsets.get(cam_dir.name, 0.0),
+                           _read_seqinfo_fps(cam_dir, fps))
+            for cam_dir in sorted(scen_dir.glob("c*")) if cam_dir.is_dir()}
+
+
 def _load_timing_offsets(scen_dir: Path, root: Path, name: str) -> dict[str, float]:
     """Camera start offsets (seconds) onto the shared scenario clock.
 

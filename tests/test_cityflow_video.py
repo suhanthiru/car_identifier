@@ -68,6 +68,54 @@ def test_video_frame_source_reuses_one_capture_handle(tmp_path):
     src.close()
 
 
+def test_frame_at_repeated_request_returns_the_same_frame(tmp_path):
+    """Asking twice for the frame you just got must not answer "no frame".
+
+    The forward-read fast path skipped its loop entirely when the requested
+    frame was the one already decoded, returned None, and the frame endpoint
+    turned that into a 404 the console shows as "this camera's footage has
+    ended". A paused replay polls the SAME clock value every 500 ms, so every
+    poll after the first reported all five cameras dead.
+    """
+    video_path = tmp_path / "vdo.avi"
+    make_video(video_path)
+    src = VideoFrameSource(video_path)
+    first = src.frame_at(2)
+    assert first is not None
+    again = src.frame_at(2)
+    assert again is not None
+    assert np.array_equal(first, again)
+    # And a third time, plus after a backwards jump that clears the cache.
+    assert src.frame_at(2) is not None
+    assert src.frame_at(0) is not None
+    assert src.frame_at(0) is not None
+    src.close()
+
+
+def test_frame_at_past_end_then_valid_frame_recovers(tmp_path):
+    """One out-of-range request must not poison the capture for later ones."""
+    video_path = tmp_path / "vdo.avi"
+    make_video(video_path, n_frames=5)
+    src = VideoFrameSource(video_path)
+    assert src.frame_at(1) is not None
+    assert src.frame_at(999) is None
+    assert src.frame_at(1) is not None
+    src.close()
+
+
+def test_crop_then_frame_at_same_frame_still_decodes(tmp_path):
+    """crop() moves the decoder and drops the cache; frame_at must re-seek
+    rather than trust a position with no pixels behind it."""
+    video_path = tmp_path / "vdo.avi"
+    make_video(video_path)
+    src = VideoFrameSource(video_path)
+    assert src.crop(2, (8, 8, 20, 15)) is not None
+    img = src.frame_at(2)
+    assert img is not None
+    assert img.shape[:2] == (FRAME_H, FRAME_W)
+    src.close()
+
+
 def test_video_frame_source_missing_file_raises(tmp_path):
     src = VideoFrameSource(tmp_path / "nope.avi")
     with pytest.raises(FileNotFoundError):

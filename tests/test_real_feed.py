@@ -87,7 +87,8 @@ def test_vehicle_index_picks_earliest_appearance_with_a_real_thumbnail(tmp_path)
             TrackSpan("S01", "c002", 7, enter_s=5.0, exit_s=6.0),   # earlier
             TrackSpan("S01", "c001", 7, enter_s=50.0, exit_s=51.0),
         ))
-    index = build_vehicle_index(scenario, {"c001": cam1, "c002": cam2})
+    index = build_vehicle_index(scenario, {"c001": cam1, "c002": cam2},
+                                use_cache=False)
     assert len(index) == 1
     entry = index[0]
     assert entry["vehicle_id"] == 7
@@ -106,5 +107,25 @@ def test_vehicle_index_covers_every_vehicle_sorted_by_id(tmp_path):
             TrackSpan("S01", "c001", 2, enter_s=0.0, exit_s=1.0),
             TrackSpan("S01", "c001", 1, enter_s=0.0, exit_s=1.0),
         ))
-    index = build_vehicle_index(scenario, {"c001": cam})
+    index = build_vehicle_index(scenario, {"c001": cam}, use_cache=False)
     assert [e["vehicle_id"] for e in index] == [1, 2]
+
+
+def test_index_cache_path_separates_datasets_with_the_same_scenario_name(tmp_path):
+    """Two datasets both containing an "S01" must not share a cache file.
+
+    The path is relative to the CWD, so a fixture scenario named S01 wrote
+    over the real S01's browse index. The version key kept the served data
+    correct, but the two evicted each other on every run and each eviction
+    costs a full rebuild -- decoding three 1080p frames per vehicle -- which
+    is paid at exactly the moment an operator switches scenario.
+    """
+    from server.real_feed import _index_cache_path
+
+    real = {"c001": tmp_path / "real" / "S01" / "c001"}
+    fixture = {"c001": tmp_path / "fixture" / "S01" / "c001"}
+    for d in (*real.values(), *fixture.values()):
+        d.mkdir(parents=True)
+    assert _index_cache_path("S01", real) != _index_cache_path("S01", fixture)
+    # Same dataset must still be stable across calls, or nothing ever hits.
+    assert _index_cache_path("S01", real) == _index_cache_path("S01", real)

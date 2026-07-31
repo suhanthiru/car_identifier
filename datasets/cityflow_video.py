@@ -85,6 +85,8 @@ class VideoFrameSource:
         self._path = video_path
         self._cap = None
         self._pos: int | None = None      # last decoded frame, for frame_at
+        self._last: np.ndarray | None = None   # that frame's pixels, for re-asks
+        self._n_frames: int | None = None      # container frame count, 0 = unknown
 
     def _capture(self):
         import cv2
@@ -96,6 +98,27 @@ class VideoFrameSource:
             self._cap = cap
         return self._cap
 
+    def frame_count(self) -> int:
+        """Frames in the container, or 0 if it does not say.
+
+        Read from the header once, not by decoding. Used to reject an
+        out-of-range request before it reaches the decoder: `cap.set()` to a
+        frame past the end makes FFmpeg scan for a keyframe that is not there,
+        which costs far more than a normal read and then fails anyway. A live
+        view polling twice a second past the end of its clip pays that on
+        every tick -- with 25 cameras in S04 that is what made the console
+        buffer and lock up as clips ran out.
+        """
+        import cv2
+
+        if self._n_frames is None:
+            try:
+                self._n_frames = max(0, int(
+                    self._capture().get(cv2.CAP_PROP_FRAME_COUNT)))
+            except Exception:            # noqa: BLE001 — treat as "unknown"
+                self._n_frames = 0
+        return self._n_frames
+
     def frame_at(self, frame: int) -> np.ndarray | None:
         """Whole frame `frame`, decoding forward when that is cheaper.
 
@@ -105,23 +128,42 @@ class VideoFrameSource:
         almost always asks for a frame slightly AHEAD of the last one, so read
         forward instead; fall back to seeking only for a jump backwards or a
         skip long enough that reading would cost more.
+
+        Re-asking for the frame just returned is answered from `self._last`.
+        That case used to fall through the forward-read loop without executing
+        it once and return None, which the frame endpoint reports as a 404 and
+        the console renders as "this camera's footage has ended" -- about a
+        camera that is running perfectly. Every poll while the replay is
+        PAUSED asks for the same clock value, so a paused console declared all
+        five cameras dead; so did a second browser tab polling in step with
+        the first.
         """
         import cv2
 
         cap = self._capture()
-        current = getattr(self, "_pos", None)
-        ahead = current is not None and 0 <= frame - current <= self.SEEK_AHEAD_MAX
+        if frame == self._pos and self._last is not None:
+            return self._last
+        # Cheap rejection before the decoder is touched at all.
+        n = self.frame_count()
+        if frame < 0 or (n and frame >= n):
+            return None
+        current = self._pos
+        # Strictly ahead: frame == current with no cached pixels means the
+        # decoder has already consumed it, so that must seek, not read.
+        ahead = current is not None and 0 < frame - current <= self.SEEK_AHEAD_MAX
         if not ahead:
             cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, frame))
             current = frame - 1
         img = None
-        while current is None or current < frame:
+        while current < frame:
             ok, img = cap.read()
             if not ok or img is None:
                 self._pos = None
+                self._last = None
                 return None
-            current = frame if current is None else current + 1
+            current += 1
         self._pos = frame
+        self._last = img
         return img
 
     # Reading this many frames forward beats paying for a keyframe seek.
@@ -135,7 +177,11 @@ class VideoFrameSource:
         ok, img = cap.read()
         # Keep frame_at's forward-read fast path honest: this just moved the
         # decoder, and a stale position would make it read from the wrong place.
+        # The cached full frame is dropped rather than kept -- crop() is the
+        # ingest path, one call per sighting per camera, and holding a 1080p
+        # frame per source for a re-ask that never comes is pure footprint.
         self._pos = frame if (ok and img is not None) else None
+        self._last = None
         if not ok or img is None:
             return None
         left, top, w, h = bbox
@@ -148,3 +194,4 @@ class VideoFrameSource:
             self._cap.release()
             self._cap = None
         self._pos = None
+        self._last = None

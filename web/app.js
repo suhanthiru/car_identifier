@@ -649,10 +649,27 @@ function openCameraView(cameraId) {
   const note = document.getElementById("cv-note");
   const baseNote = note.textContent;
   // Cameras in a scenario neither start together nor run equally long — the
-  // scenario timeline is the maximum across all of them — so near the end the
-  // clock outruns the shorter videos and the endpoint has no frame to serve.
-  // Say that, rather than leaving a broken image and letting it read as a
-  // failure of the system.
+  // scenario clock spans the union of them — so a camera can be outside its
+  // own footage at either end. In S04 the starts are staggered by up to 40 s
+  // against clips of ~30 s, so "not yet" is as common as "finished"; the note
+  // says window rather than ended because an <img> error cannot read the
+  // response body that distinguishes them.
+  // Ask for the next frame only once this one has arrived. A fixed interval
+  // was measured against a server that answers in ~70 ms when idle but
+  // 630-710 ms (p50) while the replay is decoding every camera for perception
+  // — so a 500 ms timer always fired before the previous frame landed. The
+  // browser cancels the in-flight request when src is reassigned, so the view
+  // spent much of its time discarding frames it had nearly finished
+  // downloading and starting again: visible stutter that reads as buffering.
+  // Chaining off load/error settles it to whatever rate the server can
+  // actually sustain, and it always shows the newest frame it managed to get.
+  const MIN_GAP_MS = 500;             // never poll faster than the old rate
+  let lastStart = 0;
+  const schedule = () => {
+    if (cameraViewTimer === null) return;      // view was closed
+    const wait = Math.max(0, MIN_GAP_MS - (performance.now() - lastStart));
+    cameraViewTimer = setTimeout(tick, wait);
+  };
   img.onerror = () => {
     // Hide the element, not just its src: an <img> with no source still
     // renders the browser's broken-image glyph and its alt text, which is how
@@ -660,32 +677,32 @@ function openCameraView(cameraId) {
     img.style.display = "none";
     note.classList.add("mo-note-warn");
     note.textContent = `No frame from ${cameraId} at this point in the replay — `
-      + "this camera's footage has ended. Other cameras may still be running; "
-      + "the scenario clock spans the longest of them.";
+      + "the clock is outside this camera's own footage window. Other cameras "
+      + "may still be running; the scenario clock spans all of them.";
+    schedule();
   };
   img.onload = () => {
     img.style.display = "";
     note.classList.remove("mo-note-warn");
     note.textContent = baseNote;
+    schedule();
   };
   const tick = () => {
+    lastStart = performance.now();
     const t = clockNow();
     img.src = `/api/cityflow/camera/${encodeURIComponent(cameraId)}/frame.jpg?t=${t.toFixed(2)}`;
   };
+  clearTimeout(cameraViewTimer);
+  cameraViewTimer = 0;                // non-null: the view is open
   tick();
-  clearInterval(cameraViewTimer);
-  // ~2 fps. The endpoint costs ~70 ms alone (18.6 ms per decoded frame; resize
-  // and JPEG encode are ~2 ms together), but while the replay is decoding all
-  // five cameras it measures ~450 ms. Polling faster than the server can answer
-  // just queues requests, so the view would lag the clock instead of tracking
-  // it — and a live view that drifts behind is worse than one that steps.
-  cameraViewTimer = setInterval(tick, 500);
 }
 
 function closeOverlay(id) {
   const el = document.getElementById(id);
   if (el) el.classList.add("hidden");
-  if (id === "camera-view") { clearInterval(cameraViewTimer); cameraViewTimer = null; }
+  // null is the "closed" flag the self-scheduling frame loop checks before it
+  // queues another tick; clearing the timer alone would let one more fire.
+  if (id === "camera-view") { clearTimeout(cameraViewTimer); cameraViewTimer = null; }
   if (id === "clip-view") {
     clearInterval(clipViewTimer);
     clipViewTimer = null;

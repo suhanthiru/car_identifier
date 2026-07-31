@@ -15,6 +15,7 @@ processes replaying the simulator (see server/feed.py).
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import dataclasses
@@ -261,6 +262,8 @@ def create_app(
     state.cityflow_root = Path(cityflow_root) if cityflow_root else None
     state.cityflow_scenario = None
     state.cityflow_camera_dirs = {}
+    # camera_id -> (offset_s, fps), set with the scenario; see camera_clocks().
+    state.cityflow_camera_clocks: dict[str, tuple[float, float]] = {}
     state.cityflow_vehicle_index = None  # lazily built + cached
     state.pending_scenario = ""          # set by POST /api/cityflow/scenario
     # Guards the browse-index build so only one ever runs; see
@@ -278,12 +281,15 @@ def create_app(
         Called by the supervisor between runs, never mid-replay — the feed,
         the tracker and the map all have to agree on which cameras exist.
         """
-        from datasets.cityflow import CityFlow
+        from datasets.cityflow import CityFlow, camera_clocks
         from datasets.cityflow_video import discover_camera_dirs
 
         scen = CityFlow(state.cityflow_root).load_scenario(name)
         state.cityflow_scenario = scen
         state.cityflow_camera_dirs = discover_camera_dirs(state.cityflow_root, name)
+        # How to turn a scenario-clock second into a frame of each camera's own
+        # video. Cameras in a scenario start at different wall-clock moments.
+        state.cityflow_camera_clocks = camera_clocks(state.cityflow_root, name)
         state.cityflow_vehicle_index = None      # rebuilt for the new scenario
         state.footage_duration_s = 0.0
         # Per-camera video handles belong to the old scenario's files, and must
@@ -620,34 +626,52 @@ def create_app(
     @app.post("/api/targets", status_code=201)
     async def flag_target(req: FlagTargetRequest):
         target_id = f"tgt-{next(state.target_seq):03d}"
-        profile = profile_from_flag(
-            target_id, req.label, req.plate, req.class_attrs, req.instance_attrs)
-        reference_crop = ""
-        if req.reference_crop_b64:
-            try:
-                png = base64.b64decode(req.reference_crop_b64, validate=True)
-                extras = [base64.b64decode(g, validate=True)
-                          for g in req.reference_gallery_b64]
-            except binascii.Error as exc:
-                raise HTTPException(
-                    422, "reference crop is not valid base64") from exc
-            profile = _seed_profile_from_photo(profile, png, extras)
-            reference_crop = f"{target_id}-ref.png"
-            (state.crops_dir / reference_crop).write_bytes(png)
-        state.tracker.flag_target(profile)
-        with Session(engine) as session:
-            session.add(dbm.TargetRow(
-                target_id=target_id, label=req.label, plate=profile.plate,
-                class_attrs=dbm.dumps(dict(profile.class_attrs)),
-                instance_attrs=dbm.dumps(dict(profile.instance_attrs)),
-                reference_crop=reference_crop,
-                created_s=state.sim_now))
-            audit_record(session, "operator", "flag_target",
-                         {"target_id": target_id, "label": req.label,
-                          "plate": profile.plate,
-                          "photo_seeded": bool(req.reference_crop_b64)},
-                         state.sim_now)
-            session.commit()
+
+        def _build_and_store():
+            """Everything blocking about flagging, off the event loop.
+
+            Seeding a photo runs the ReID embedder once per reference crop
+            (four of them for a browse-list flag), decodes each PNG, writes a
+            file and commits to SQLite. This route is `async` so it can await
+            the snapshot broadcast, which means all of that ran ON the event
+            loop -- freezing the replay clock, every camera's ingest task and
+            every WebSocket client for as long as it took. Flagging a car
+            visibly locked up the console; as a sync route in the threadpool
+            it never did. The await below is the only part that belongs on
+            the loop.
+            """
+            profile = profile_from_flag(
+                target_id, req.label, req.plate,
+                req.class_attrs, req.instance_attrs)
+            reference_crop = ""
+            if req.reference_crop_b64:
+                try:
+                    png = base64.b64decode(req.reference_crop_b64, validate=True)
+                    extras = [base64.b64decode(g, validate=True)
+                              for g in req.reference_gallery_b64]
+                except binascii.Error as exc:
+                    raise HTTPException(
+                        422, "reference crop is not valid base64") from exc
+                profile = _seed_profile_from_photo(profile, png, extras)
+                reference_crop = f"{target_id}-ref.png"
+                (state.crops_dir / reference_crop).write_bytes(png)
+            with state.tracker_lock:
+                state.tracker.flag_target(profile)
+            with Session(engine) as session:
+                session.add(dbm.TargetRow(
+                    target_id=target_id, label=req.label, plate=profile.plate,
+                    class_attrs=dbm.dumps(dict(profile.class_attrs)),
+                    instance_attrs=dbm.dumps(dict(profile.instance_attrs)),
+                    reference_crop=reference_crop,
+                    created_s=state.sim_now))
+                audit_record(session, "operator", "flag_target",
+                             {"target_id": target_id, "label": req.label,
+                              "plate": profile.plate,
+                              "photo_seeded": bool(req.reference_crop_b64)},
+                             state.sim_now)
+                session.commit()
+
+        await asyncio.to_thread(_build_and_store)
         # Tell the console immediately. The targets list is painted from the
         # snapshot broadcast, which was only ever sent on sighting ingest — so
         # flagging while the feed was paused, or after the replay had finished,
@@ -1210,10 +1234,19 @@ def create_app(
         if not (at == at) or at in (float("inf"), float("-inf")):
             raise HTTPException(422, "t must be a finite number")
         at = min(max(0.0, at), 24 * 3600.0)
+        # Scenario seconds -> a frame of THIS camera's video. Cameras start at
+        # different moments on the shared clock (up to 40 s apart in S04), so
+        # the offset is not optional: without it the view either shows the
+        # wrong moment or claims the footage ended while the camera is live.
+        offset_s, cam_fps = (state.cityflow_camera_clocks or {}).get(
+            camera_id, (0.0, DEFAULT_FPS))
+        frame = int((at - offset_s) * (cam_fps or DEFAULT_FPS))
+        if frame < 0:
+            raise HTTPException(404, "before this camera's footage begins")
         with lock:
-            img = src.frame_at(int(at * DEFAULT_FPS))
+            img = src.frame_at(frame)
         if img is None:
-            raise HTTPException(404, "no frame at that time")
+            raise HTTPException(404, "after this camera's footage ends")
         # Downscale before encoding. Source frames are 1080p and encode to
         # ~280 KB, which at a 4 fps refresh is both slower than the refresh
         # interval and pointless: the overlay renders far smaller than this.

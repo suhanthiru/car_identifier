@@ -14,8 +14,29 @@ prior's visual quality, and the `slow` marker already exists for anything that
 genuinely needs real weights.
 """
 import os
+import tempfile
 
 import pytest
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _isolate_derived_cache():
+    """Keep the suite out of the real `data/cache`.
+
+    The browse-index cache path is relative to the CWD, so tests running from
+    the repo root wrote fixture indexes next to — and, before the path carried
+    the dataset root, directly ON TOP OF — the real ones. The real S01 index is
+    31 MB and takes a full rebuild to replace, and that rebuild is paid at the
+    moment an operator switches scenario.
+    """
+    previous = os.environ.get("EYES_CACHE_DIR")
+    with tempfile.TemporaryDirectory(prefix="eyes-test-cache-") as tmp:
+        os.environ["EYES_CACHE_DIR"] = tmp
+        yield
+    if previous is None:
+        os.environ.pop("EYES_CACHE_DIR", None)
+    else:
+        os.environ["EYES_CACHE_DIR"] = previous
 
 
 @pytest.fixture(scope="session", autouse=True)
