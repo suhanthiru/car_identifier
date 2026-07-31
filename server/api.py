@@ -835,6 +835,30 @@ def create_app(
 
     # ---------------------------------------------------------- sightings
 
+    def _write_crop(name: str, data: bytes) -> None:
+        """Write one PNG into crops_dir, or refuse.
+
+        Second lock on the same door the schema now bolts. The read endpoint
+        has always resolved and containment-checked its path; the write path
+        interpolated a request field straight into a filename and trusted it,
+        which is how `event_id: "../../x"` put attacker bytes outside the
+        crops directory. A validation pattern is easy to widen by accident
+        later -- this cannot be, because it checks the resolved path.
+        """
+        target = (state.crops_dir / name)
+        try:
+            resolved = target.resolve()
+            root = state.crops_dir.resolve()
+        except (OSError, ValueError) as exc:
+            raise HTTPException(422, "invalid crop name") from exc
+        if resolved != root and root not in resolved.parents:
+            raise HTTPException(422, "crop name escapes the crops directory")
+        try:
+            resolved.write_bytes(data)
+        except OSError as exc:
+            # An unwritable name is the caller's problem, not a server fault.
+            raise HTTPException(422, f"cannot store crop: {exc.strerror}") from exc
+
     @app.post("/api/sightings", status_code=202)
     async def report_sighting(report: SightingReport):
         obs = _observation_from_report(report)
@@ -846,7 +870,7 @@ def create_app(
             except binascii.Error as exc:
                 raise HTTPException(422, "crop_png_b64 is not valid base64") from exc
             crop_name = f"{obs.event_id}.png"
-            (state.crops_dir / crop_name).write_bytes(png)
+            _write_crop(crop_name, png)
 
         # Short looping sighting clip, saved as sibling frames the review card
         # flips through; reuses the same /api/crops server as the still.
@@ -857,7 +881,7 @@ def create_app(
             except binascii.Error as exc:
                 raise HTTPException(
                     422, "clip_frames_b64 contains invalid base64") from exc
-            (state.crops_dir / f"{obs.event_id}.f{i}.png").write_bytes(frame_png)
+            _write_crop(f"{obs.event_id}.f{i}.png", frame_png)
             clip_count += 1
 
         with state.tracker_lock:

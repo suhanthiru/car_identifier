@@ -56,6 +56,61 @@ def test_world_endpoints(client):
     assert all(e["min_s"] < e["max_s"] for e in adjacency)
 
 
+@pytest.mark.parametrize("bad_id", [
+    "../pwn",
+    "../../pwn",
+    "../" * 30 + "deep",
+    "/abs_unix",
+    "C:\\Windows\\Temp\\pwn",
+    "..\\..\\pwn",
+    "sub/dir/pwn",
+    "evt\x00null",
+    "evt<gt>",
+    "evt|pipe",
+])
+def test_sighting_event_id_cannot_escape_the_crops_directory(client, bad_id):
+    """The event id becomes a filename, so it is an arbitrary-write primitive.
+
+    `crop_png_b64` was stored at `crops_dir / f"{event_id}.png"` with no
+    containment check on a field that allowed any 120 characters. A single
+    unauthenticated POST wrote attacker-controlled bytes to a drive root and
+    to the system temp directory. The characters Windows rejects in a filename
+    (NUL, <, >, |) additionally made write_bytes() raise and 500 the request.
+    """
+    resp = client.post("/api/sightings", json=sighting(
+        event_id=bad_id, crop=True))
+    assert resp.status_code == 422, (
+        f"{bad_id!r} was accepted with {resp.status_code}")
+
+
+def test_sighting_event_id_still_accepts_the_ids_really_used(client):
+    """The restriction must not reject the real producers: the synthetic feed's
+    `evt-00016` and the CityFlow feed's `cf-c001-1234-56`."""
+    for good in ("evt-00016", "cf-c001-1234-56", "evt.1", "E7"):
+        resp = client.post("/api/sightings", json=sighting(
+            event_id=good, crop=True))
+        assert resp.status_code == 202, f"{good!r} rejected: {resp.text}"
+
+
+@pytest.mark.parametrize("field,value", [
+    ("timestamp_s", 1e308), ("timestamp_s", 1e20), ("timestamp_s", -1e308),
+    ("lat", 1e308), ("lon", -1e308), ("lat", 91.0), ("lon", 181.0),
+])
+def test_sighting_rejects_absurd_but_finite_numbers(client, field, value):
+    """allow_inf_nan=False stops Infinity and NaN; it does nothing about 1e308.
+
+    That mattered because `state.sim_now = max(sim_now, timestamp_s)` runs
+    before the work that then failed, so a request that 500'd still left the
+    replay clock at 1e308 for every connected client until an operator reset
+    it — the exact outage the Infinity guard exists to prevent.
+    """
+    before = client.get("/api/stats").json()["sim_now"]
+    assert client.post("/api/sightings",
+                       json=sighting(**{field: value})).status_code == 422
+    assert client.get("/api/stats").json()["sim_now"] == before, \
+        "a rejected sighting moved the clock"
+
+
 def test_activity_reports_only_what_the_run_has_actually_done(client):
     """The browse list's default filter selects on this, so it must describe
     the RUN and not the dataset.

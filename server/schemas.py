@@ -84,11 +84,29 @@ class PlateReadIn(StrictModel):
 class SightingReport(StrictModel):
     """What an edge node reports for one vehicle passage."""
 
-    event_id: str = Field(min_length=1, max_length=120)
+    # The event id becomes a FILENAME: the crop is stored as `{event_id}.png`
+    # and the clip frames as `{event_id}.f{i}.png`. It was an unrestricted
+    # 120-character string, so a single unauthenticated POST could write
+    # attacker-controlled bytes anywhere the server process can write --
+    # `../../x`, `C:\...\x`, `/x` were all confirmed to escape the crops
+    # directory, including to a drive root. The read side already resolves and
+    # checks containment; the write side had nothing.
+    #
+    # Restricted to what real ids actually use (`evt-00016`,
+    # `cf-c001-1234-56`), which also removes the `<`, `>`, `|` and NUL
+    # characters that made write_bytes() raise and 500 the request.
+    event_id: Annotated[str, StringConstraints(
+        min_length=1, max_length=120, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$")]
     camera_id: str = Field(min_length=1, max_length=40)
-    timestamp_s: float
-    lat: float
-    lon: float
+    # Bounded, not merely finite. allow_inf_nan=False rejects Infinity and NaN
+    # but happily accepted 1e308, and `state.sim_now = max(sim_now, ...)` runs
+    # BEFORE the work that then failed -- so one rejected request left the
+    # replay clock at 1e308 permanently, for every client, exactly the outage
+    # the Infinity guard was written to prevent. Range is generous (about 31
+    # years of footage) and still keeps the clock representable.
+    timestamp_s: float = Field(ge=0.0, le=1e9)
+    lat: float = Field(ge=-90.0, le=90.0)
+    lon: float = Field(ge=-180.0, le=180.0)
     embedding: list[float] = Field(min_length=8)
     plate: PlateReadIn | None = None
     class_attrs: AttrMap = {}
