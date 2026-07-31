@@ -257,8 +257,25 @@ function renderScaleStrip(s) {
     // queue, 3D dossier) implies matches are what normally happens. Leaving
     // that gap to the changelog is overclaiming by omission, which is the one
     // thing this project is built not to do.
-    `<span class="ss-note" title="Measured, not guessed: the default OSNet backbone scores about 0.52 fair AUC across cameras — near chance — so it rarely clears an alerting threshold on real footage. RESULTS.md records that the live console proposed no cross-camera match at all on this data. Zero reviews is the documented expected outcome here, not a fault. The FastReID backbone retrieves far better; see the README.">`
-    + `zero reviews is expected here — why?</span>`;
+    // Clickable, not hover-only. The answer lived entirely in a `title`
+    // attribute, so the console asked "why?" on screen and kept the answer
+    // where a mouse had to find it — and touch devices have no hover at all.
+    // A first-time reader reported it as a rhetorical question the developers
+    // had declined to answer, which is the opposite of the intent.
+    `<button type="button" class="ss-note" id="ss-why"`
+    + ` aria-expanded="false">zero reviews is expected here — why?</button>`;
+  const why = document.getElementById("ss-why");
+  if (why && !why.dataset.wired) {
+    why.dataset.wired = "1";
+    why.onclick = () => {
+      const box = document.getElementById("ss-why-body");
+      const open = box.classList.toggle("hidden");
+      why.setAttribute("aria-expanded", String(!open));
+      why.textContent = open
+        ? "zero reviews is expected here — why?"
+        : "zero reviews is expected here — hide";
+    };
+  }
 }
 
 async function initRestart() {
