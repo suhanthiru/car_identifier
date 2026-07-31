@@ -237,10 +237,46 @@ function fmtClock(t) {
 /* Which target the reasoning panel is following. Null = none picked yet. */
 let reasoningTarget = null;
 
+/* Collapsed state, remembered across reloads.
+ *
+ * It has to persist: switching scenario reloads the page, and a panel that
+ * sprang back open every time would be worse than not being collapsible. The
+ * head stays visible when collapsed and keeps showing the target, its belief
+ * and its track state, so shrinking the panel costs the reasoning and never
+ * the summary. */
+const RP_COLLAPSED_KEY = "eyes.cascade.collapsed";
+
+function applyReasoningCollapsed(collapsed) {
+  const panel = document.getElementById("reasoning-panel");
+  const btn = document.getElementById("rp-toggle");
+  if (!panel || !btn) return;
+  panel.classList.toggle("rp-collapsed", collapsed);
+  btn.setAttribute("aria-expanded", String(!collapsed));
+  btn.title = collapsed
+    ? "Expand the cascade panel"
+    : "Collapse the cascade panel — the summary stays in this bar";
+}
+
+function initReasoningToggle() {
+  const btn = document.getElementById("rp-toggle");
+  if (!btn || btn.dataset.wired) return;
+  btn.dataset.wired = "1";
+  let collapsed = false;
+  try { collapsed = localStorage.getItem(RP_COLLAPSED_KEY) === "1"; } catch (e) { /* private mode */ }
+  applyReasoningCollapsed(collapsed);
+  btn.onclick = () => {
+    const now = !document.getElementById("reasoning-panel")
+      .classList.contains("rp-collapsed");
+    applyReasoningCollapsed(now);
+    try { localStorage.setItem(RP_COLLAPSED_KEY, now ? "1" : "0"); } catch (e) { /* ignore */ }
+  };
+}
+
 function setReasoningTarget(targetId) {
   reasoningTarget = targetId;
   const panel = document.getElementById("reasoning-panel");
   if (panel) panel.classList.remove("hidden");
+  initReasoningToggle();
   refreshReasoning();
 }
 

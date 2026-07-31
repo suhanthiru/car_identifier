@@ -120,10 +120,16 @@
        yourself. Every field below was already computed for every sighting
        against every flagged target, and then thrown away. -->
   <div id="reasoning-panel" class="panel hidden">
-    <div class="panel-head">
+    <!-- The whole head is the collapse control, not just the chevron: this
+         panel sits under the map and the map is the thing an operator most
+         often wants more room for. Collapsed it keeps the one-line summary in
+         the head, so shrinking it costs you the reasoning, never the state. -->
+    <button type="button" class="panel-head rp-toggle" id="rp-toggle"
+            aria-expanded="true" aria-controls="reasoning-body">
+      <span class="rp-chev" aria-hidden="true">▾</span>
       <span>CASCADE — WHAT IT IS THINKING</span>
       <span class="panel-hint" id="rp-hint">select a target to follow</span>
-    </div>
+    </button>
     <div id="reasoning-body">
       <div class="rp-idle">Flag a car, then pick it in TARGETS to watch the
         cascade decide about it sighting by sighting.</div>

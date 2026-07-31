@@ -617,6 +617,13 @@ table.dossier-table th { color: var(--dim); font-weight: 600; }
 }
 #map-column #map-panel { flex: 1; min-height: 0; border-right: none; }
 #map-column #timeline-panel { flex: none; border-right: none; }
+/* flex: none, exactly like the timeline above it. Without this the panel is a
+   flex child that shrinks to nothing next to the map's flex:1 — it rendered
+   into the DOM, so a query could read its contents, and measured zero pixels
+   tall on screen. Present to a script, invisible to a person. */
+#map-column #reasoning-panel {
+  flex: none; border-right: none; border-top: 1px solid var(--line);
+}
 /* Cameras are only clickable in real mode, where there is footage behind
    them; a pointer cursor in the synthetic world would promise one. */
 .cam-clickable { cursor: pointer; }
@@ -628,7 +635,11 @@ table.dossier-table th { color: var(--dim); font-weight: 600; }
    decide" — reads as a deliberate answer rather than a failure state, because
    that is exactly what it is. */
 #reasoning-panel { margin-top: 8px; }
-#reasoning-body { padding: 8px 10px; max-height: 340px; overflow-y: auto; }
+/* Bounded so it cannot starve the map on a short screen: the panel is worth
+   reading, the map is worth keeping. Anything longer scrolls inside here. */
+#reasoning-body {
+  padding: 8px 10px; max-height: min(250px, 26vh); overflow-y: auto;
+}
 .rp-idle { color: var(--dim); font-size: 11px; line-height: 1.55; padding: 6px 2px; }
 .rp-verdict {
   border-left: 3px solid var(--dim); padding: 6px 9px; border-radius: 2px;
@@ -666,3 +677,23 @@ table.dossier-table th { color: var(--dim); font-weight: 600; }
   background: #2a1416; padding: 4px 7px; border-radius: 2px;
 }
 .rp-dim { color: var(--dim); font-size: 10px; line-height: 1.5; margin-top: 6px; }
+
+/* Collapse control. The head is a button but must look exactly like every
+   other panel head, or the console grows a stray control that reads as a
+   different kind of thing. */
+.rp-toggle {
+  width: 100%; font: inherit; text-align: left; cursor: pointer;
+  background: transparent; border: 0; border-bottom: 1px solid var(--line);
+  gap: 8px;
+}
+.rp-toggle:hover { color: var(--text); background: #1b222c; }
+.rp-toggle:focus-visible { outline: 1px solid var(--accent); outline-offset: -2px; }
+.rp-chev { transition: transform .15s ease; font-size: 9px; color: var(--dim); }
+#reasoning-panel.rp-collapsed .rp-chev { transform: rotate(-90deg); }
+#reasoning-panel.rp-collapsed #reasoning-body { display: none; }
+/* Collapsed the panel should occupy exactly its head, so the map gets the
+   space back — that is the point of shrinking it. */
+#reasoning-panel.rp-collapsed { flex: none; }
+/* The hint carries the target, belief and track state, so it keeps earning
+   its place in the bar when everything else is hidden. */
+.rp-toggle .panel-hint { margin-left: auto; }
