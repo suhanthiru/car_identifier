@@ -104,6 +104,7 @@ async function initMap() {
   initClock();
   initRestart();
   if (worldSource.source === "real") {
+    pollActivity();
     initCityflowVehicleBrowser();
     initPipelineStrip();
     initTimeline();
@@ -179,9 +180,13 @@ function paintFeedPill() {
  */
 function replayNotStarted() {
   if (!latestStats || latestStats.replay_complete) return false;
-  const t = latestStats.clock_s != null ? latestStats.clock_s : latestStats.sim_now;
+  // Deliberately NOT "clock is at zero". The replay clock starts at the
+  // timestamp of the first passage in the footage — 2.58s for S01 — so a
+  // console that has never been started reads t+00:02, and a zero test called
+  // it "already playing". Nothing ingested while paused is the honest signal,
+  // and it is also right straight after a restart, which rewinds and clears.
   const seen = latestStats.counters ? latestStats.counters.sightings : 0;
-  return (t || 0) < 0.05 && !seen;
+  return !!latestStats.paused && !seen;
 }
 
 function fmtClock(t) {
@@ -497,15 +502,50 @@ async function initCityflowVehicleBrowser() {
   const biggestGap = (v) => (v.journeys || []).reduce(
     (m, j) => Math.max(m, j.gap_s || 0), 0);
   const mode = document.getElementById("cf-mode");
+  // How much reasoning this run has done about one car. Rejections count:
+  // declining a candidate is a decision, and watching the system refuse is
+  // more informative than watching it agree.
+  const reasoning = (a) => (a.considered || 0) + (a.rejected || 0)
+    + (a.reviewed || 0) + (a.refusals || 0) + (a.vetoed || 0);
   const render = () => {
     const now = clockNow();
-    const how = mode ? mode.value : "journeys";
+    const how = mode ? mode.value : "seen";
     const upcoming = (v) => (v.first_time_s || 0) >= now - 2;
     // Still worth showing while it is on screen, not only before it arrives.
     const running = (v) => (v.last_time_s || 0) > now;
+    const act = (v) => vehicleActivity[String(v.vehicle_id)] || {};
     let shown = all;
+    let emptyNote = "";
     if (how === "upcoming") shown = all.filter(upcoming);
-    else if (how === "journeys") {
+    else if (how === "seen") {
+      // Selected on what the run has ACTUALLY ingested, not on a property of
+      // the footage: a car appears here the moment a camera reports it and
+      // not one second earlier. Most recently seen first.
+      shown = all.filter((v) => (act(v).sightings || 0) > 0);
+      shown = shown.slice().sort(
+        (a, b) => (act(b).last_time_s || 0) - (act(a).last_time_s || 0));
+      if (!shown.length) {
+        emptyNote = replayNotStarted()
+          ? "The replay has not started yet — press ▶ START and cars will "
+            + "appear here as the cameras report them."
+          : "No camera has reported a vehicle yet at this point in the replay.";
+      }
+    } else if (how === "reasoned") {
+      shown = all.filter((v) => reasoning(act(v)) > 0);
+      shown = shown.slice().sort((a, b) => reasoning(act(b)) - reasoning(act(a)));
+      if (!shown.length) {
+        // The honest reason, not an empty grid. The cascade compares each
+        // sighting against the FLAGGED targets; with none flagged there is
+        // nothing to compare against and so nothing to report.
+        emptyNote = activityTargets
+          ? "Nothing reasoned about yet — sightings are compared against your "
+            + "flagged cars, and none has produced a decision at this point in "
+            + "the replay."
+          : "Nothing is flagged yet. The system compares each sighting against "
+            + "the cars you flag, so flag one from another view and its "
+            + "decisions will appear here as the replay runs.";
+      }
+    } else if (how === "journeys") {
       shown = all.filter((v) => running(v) && (v.journeys || []).length > 0);
       // Longest gap first: no threshold to argue about, and the clearest
       // examples of the problem end up at the top where they are seen.
@@ -517,11 +557,15 @@ async function initCityflowVehicleBrowser() {
         ? `all ${all.length}`
         : `${shown.length} of ${all.length}`;
     }
+    browseEmptyNote = emptyNote;
     // Only rebuild when the visible SET changes. Re-rendering unconditionally
     // every few seconds tore down and recreated every tile under the cursor,
     // so a click that landed mid-rebuild hit a node that was already detached
     // and silently did nothing — which is why flagging a car felt unreliable.
-    const key = shown.map((v) => v.vehicle_id).join(",");
+    // The note is part of the key: the visible SET can stay empty while the
+    // reason it is empty changes (nothing flagged -> flagged but undecided),
+    // and that transition is the whole point of showing a reason at all.
+    const key = shown.map((v) => v.vehicle_id).join(",") + "|" + emptyNote;
     if (key === lastVehicleKey) return;
     lastVehicleKey = key;
     renderVehicleTiles(shown);
@@ -535,6 +579,76 @@ async function initCityflowVehicleBrowser() {
 
 // vehicle_id -> tile element, so a refresh can reconcile instead of rebuild.
 const vehicleTiles = new Map();
+
+/* What THIS RUN has observed and concluded, per ground-truth vehicle id.
+ *
+ * Polled, not precomputed. The browse list's default filter used to select on
+ * a property of the FOOTAGE — "crosses cameras with a gap", read out of
+ * gt.txt — which says nothing about whether the system did anything. These
+ * are the run's own results, and a car is absent from them until a camera has
+ * actually reported it.
+ *
+ * `activityTargets` is null before the first poll answers, so "waiting to
+ * start" and "started, nothing yet" stay distinguishable. */
+let vehicleActivity = {};
+let activityTargets = null;
+let browseEmptyNote = "";
+
+async function pollActivity() {
+  const tick = async () => {
+    try {
+      const r = await fetch("/api/cityflow/activity");
+      if (!r.ok) return;
+      const a = await r.json();
+      vehicleActivity = a.vehicles || {};
+      activityTargets = a.targets_flagged || 0;
+    } catch (e) { /* transient: the next tick retries */ }
+  };
+  await tick();
+  setInterval(tick, 2000);
+}
+
+/** The right-hand chip on a browse tile.
+ *
+ * Prefers what THIS RUN did over what the dataset says. A tally of sightings
+ * and decisions is a claim about the system and changes as the replay plays;
+ * the gt.txt hop is only a claim about the footage, and is what the chip falls
+ * back to before the clock has reached the car.
+ */
+function watchBadge(v) {
+  const a = vehicleActivity[String(v.vehicle_id)] || {};
+  const decided = (a.rejected || 0) + (a.reviewed || 0) + (a.matched || 0)
+    + (a.refusals || 0);
+  if (decided) {
+    const parts = [];
+    if (a.matched) parts.push(`${a.matched} matched`);
+    if (a.reviewed) parts.push(`${a.reviewed} to review`);
+    if (a.rejected) parts.push(`${a.rejected} rejected`);
+    if (a.refusals) parts.push(`${a.refusals} refused`);
+    return `<span class="vt-watch vt-watch-live" title="${escapeHtml(
+      `this run: ${parts.join(', ')} across ${a.considered || 0} `
+      + `comparison(s) against your flagged cars`)}">`
+      + `${escapeHtml(parts.join(" · "))}</span>`;
+  }
+  if (a.sightings) {
+    return `<span class="vt-watch vt-watch-live" title="${escapeHtml(
+      `this run has ingested ${a.sightings} sighting(s) of this vehicle at `
+      + `${(a.cameras || []).join(', ')} — no decision yet, because sightings `
+      + `are only compared against cars you have flagged`)}">`
+      + `${a.sightings} seen</span>`;
+  }
+  const best = (v.journeys || []).slice()
+    .sort((x, y) => (y.gap_s || 0) - (x.gap_s || 0))[0];
+  if (best) {
+    return `<span class="vt-watch" title="${escapeHtml(
+      `ground truth: this vehicle left ${best.from_camera} and arrived at `
+      + `${best.to_camera} ${best.gap_s}s later, unobserved in between — the `
+      + `run has not reached it yet`)}">`
+      + `${escapeHtml(best.from_camera)}→${escapeHtml(best.to_camera)} ${best.gap_s}s</span>`;
+  }
+  return `<span class="vt-watch vt-watch-none" title="never leaves a camera's `
+    + `view: no gap to re-identify across">no gap</span>`;
+}
 
 /** Reconcile the browse grid: add what is new, remove what is gone, and leave
  * everything else's DOM node exactly where it is.
@@ -557,15 +671,26 @@ function renderVehicleTiles(vehicles) {
   if (!vehicles.length) {
     // Once the replay passes the last vehicle this list empties, and a bare
     // grid reads as a broken panel rather than an exhausted one. Say which it
-    // is, and name the two ways forward.
-    grid.innerHTML = `<div class="vt-empty">No vehicles left matching this
-      filter — the ones it wanted have already driven through. Switch to
-      <b>all vehicles</b> to browse the rest, or <b>⟲ RESTART</b> to replay
-      from t=0.</div>`;
+    // is, and name the two ways forward. The run-based filters set their own
+    // reason, which is more specific than "already driven through".
+    grid.innerHTML = `<div class="vt-empty">${browseEmptyNote
+      ? escapeHtml(browseEmptyNote)
+      : `No vehicles left matching this filter — the ones it wanted have
+         already driven through. Switch to <b>all vehicles</b> to browse the
+         rest, or <b>⟲ RESTART</b> to replay from t=0.`}</div>`;
     return;
   }
   vehicles.forEach((v) => {
-    if (vehicleTiles.has(String(v.vehicle_id))) return;   // already on screen
+    const existing = vehicleTiles.get(String(v.vehicle_id));
+    if (existing) {
+      // Keep the node (a click mid-rebuild would hit a detached one) but
+      // refresh the live tally on it — the whole value of a run-based badge is
+      // that it changes as the run proceeds.
+      const span = existing.querySelector(".vt-watch");
+      const fresh = watchBadge(v);
+      if (span && span.outerHTML !== fresh) span.outerHTML = fresh;
+      return;
+    }
     const tile = document.createElement("div");
     tile.className = "vehicle-tile";
     vehicleTiles.set(String(v.vehicle_id), tile);
@@ -585,17 +710,22 @@ function renderVehicleTiles(vehicles) {
     const hops = (v.journeys || []).slice()
       .sort((a, b) => (b.gap_s || 0) - (a.gap_s || 0));
     const best = hops[0];
-    const watch = best
-      ? `<span class="vt-watch" title="ground truth: this vehicle left ${best.from_camera} and arrived at ${best.to_camera} ${best.gap_s}s later, unobserved in between">`
-        + `${escapeHtml(best.from_camera)}→${escapeHtml(best.to_camera)} ${best.gap_s}s</span>`
-      : `<span class="vt-watch vt-watch-none" title="never leaves a camera's view: no gap to re-identify across">no gap</span>`;
-    tile.innerHTML = `${img}<div class="vt-label">#${escapeHtml(String(v.vehicle_id))} · t+${Math.round(v.first_time_s)}s ${badge} ${watch}</div>`;
-    tile.title = best
-      ? `Flag vehicle ${v.vehicle_id} — ground truth has it leaving `
-        + `${best.from_camera} and arriving at ${best.to_camera} ${best.gap_s}s later`
-        + (hops.length > 1 ? `, ${hops.length} such hops in total` : "")
-      : `Flag vehicle ${v.vehicle_id} — seen at ${cams} cameras but never with a `
-        + `gap between them, so there is no interval to re-identify across`;
+    const a = vehicleActivity[String(v.vehicle_id)] || {};
+    const decided = (a.rejected || 0) + (a.reviewed || 0) + (a.matched || 0)
+      + (a.refusals || 0);
+    tile.innerHTML = `${img}<div class="vt-label">#${escapeHtml(String(v.vehicle_id))} · t+${Math.round(v.first_time_s)}s ${badge} ${watchBadge(v)}</div>`;
+    tile.title = decided
+      ? `Flag vehicle ${v.vehicle_id} — this run has already made `
+        + `${decided} decision(s) about its sightings`
+      : a.sightings
+        ? `Flag vehicle ${v.vehicle_id} — this run has ingested ${a.sightings} `
+          + `sighting(s) of it so far`
+        : best
+          ? `Flag vehicle ${v.vehicle_id} — ground truth has it leaving `
+            + `${best.from_camera} and arriving at ${best.to_camera} ${best.gap_s}s later`
+            + (hops.length > 1 ? `, ${hops.length} such hops in total` : "")
+          : `Flag vehicle ${v.vehicle_id} — seen at ${cams} cameras but never with a `
+            + `gap between them, so there is no interval to re-identify across`;
     tile.onclick = async () => {
       // Feedback and a guard. A click used to fire off a POST with no visible
       // effect anywhere near the tile, so it read as "nothing happened" and

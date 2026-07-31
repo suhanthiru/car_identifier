@@ -27,6 +27,24 @@ def test_elapsed_advances_when_running():
     assert asyncio.run(go()) >= 0.04
 
 
+def test_clock_created_already_paused_never_starts():
+    """The console starts paused, so this is the normal case, not an edge one.
+
+    Pause bookkeeping used to happen only inside `wait_until`, and `elapsed()`
+    read the result without ever establishing it. A clock constructed while
+    already paused therefore counted wall time until some task happened to
+    wait — an untouched console opened reading t+00:02, and the toolbar could
+    not distinguish "not started" from "paused mid-run" because the clock
+    claimed time had passed.
+    """
+    async def go():
+        clock = FeedClock(_State(paused=True))
+        await asyncio.sleep(0.15)
+        return clock.elapsed()
+
+    assert asyncio.run(go()) == pytest.approx(0.0, abs=0.02)
+
+
 def test_paused_time_is_not_counted():
     """The whole point: wall time spent paused must not advance the replay."""
     async def go():

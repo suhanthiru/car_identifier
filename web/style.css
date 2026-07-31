@@ -151,6 +151,10 @@ body {
 /* A car that never leaves anyone's view poses no re-identification problem;
    say so plainly rather than dressing it as a lesser version of one. */
 .vt-watch-none { background: #23262b; color: var(--dim); }
+/* This run's own tally, as opposed to a fact read out of the dataset. Visually
+   distinct because the difference matters: one is something the system did,
+   the other is something the footage happens to contain. */
+.vt-watch-live { background: #14301f; color: #7fd6a0; }
 
 /* "What has the system actually done about this target." A quiet queue must
    not look the same as an unexamined one. */

@@ -251,6 +251,11 @@ def create_app(
     }
     state._seen_vehicle_keys: set[str] = set()
     state._last_camera_by_vehicle: dict[str, str] = {}
+    # Ground-truth vehicle id -> what this run has observed and concluded about
+    # it, accumulated live. Drives the browse list's "seen so far" and
+    # "reasoned about" filters, which select on what the system DID rather than
+    # on a property of the footage.
+    state.vehicle_activity: dict[str, dict] = {}
     # Set by POST /api/reset; start.py's supervisor watches it, tears the feed
     # down, wipes runtime state and replays from t=0. Held on state because the
     # feed and the server live in different threads and this is the only thing
@@ -857,6 +862,9 @@ def create_app(
 
         with state.tracker_lock:
             events = state.tracker.process_observation(obs)
+            # Read inside the lock: it describes the observation just processed
+            # and the next one would overwrite it.
+            verdicts = state.tracker.last_verdicts()
             events += state.tracker.tick(state.sim_now)
         with Session(engine) as session:
             session.add(dbm.SightingRow(
@@ -878,7 +886,7 @@ def create_app(
                           "outcomes": [e.kind for e in events]}, obs.timestamp_s)
             session.commit()
         state.last_ingest_s = state.sim_now
-        _tally(obs, events)
+        _tally(obs, events, verdicts)
         await state.manager.broadcast({
             "type": "contact", "event_id": obs.event_id,
             "camera_id": obs.camera_id, "timestamp_s": obs.timestamp_s,
@@ -897,7 +905,7 @@ def create_app(
             "targets": state.tracker.snapshot(state.sim_now)})
         return {"events": [e.kind for e in events]}
 
-    def _tally(obs, events) -> None:
+    def _tally(obs, events, verdicts=None) -> None:
         """Update the live scale counters from one ingested sighting."""
         c = state.counters
         c["sightings"] += 1
@@ -908,13 +916,30 @@ def create_app(
         if key not in state._seen_vehicle_keys:
             state._seen_vehicle_keys.add(key)
             c["vehicles_seen"] = len(state._seen_vehicle_keys)
+        # Per-vehicle record of what THIS RUN has done, for the browse list.
+        # Accumulated as it happens: nothing here is precomputed, and before
+        # the clock reaches a car there is nothing to report about it.
+        act = state.vehicle_activity.setdefault(key, {
+            "sightings": 0, "cameras": [], "considered": 0, "rejected": 0,
+            "reviewed": 0, "matched": 0, "undecided": 0, "vetoed": 0,
+            "refusals": 0, "alerts": 0, "last_time_s": 0.0,
+        })
+        act["sightings"] += 1
+        act["last_time_s"] = round(obs.timestamp_s, 2)
+        if obs.camera_id not in act["cameras"]:
+            act["cameras"].append(obs.camera_id)
+        for name, n in (verdicts or {}).items():
+            act[name] = act.get(name, 0) + n
         for ev in events:
             if ev.kind == "review":
                 c["reviews_raised"] += 1
+                act["reviewed"] = act.get("reviewed", 0) + 1
             elif ev.kind == "alert":
                 c["alerts"] += 1
+                act["alerts"] += 1
             if ev.detail.get("refused_to_individuate"):
                 c["refusals"] += 1
+                act["refusals"] += 1
 
     def _hops_from(obs) -> list[dict]:
         """Cross-camera transitions for this sighting's ground-truth vehicle.
@@ -1110,6 +1135,7 @@ def create_app(
         state.counters = {k: 0 for k in state.counters}
         state._seen_vehicle_keys = set()
         state._last_camera_by_vehicle = {}
+        state.vehicle_activity = {}
         state.car3d_jobs = {}
         # Restart lands in the same state as a fresh launch: rewound AND
         # waiting. Resuming automatically would replay the opening seconds
@@ -1397,6 +1423,25 @@ def create_app(
         # for the one vehicle actually being flagged, so it is fetched then.
         return [{k: val for k, val in v.items() if k != "gallery_b64"}
                 for v in rows]
+
+    @app.get("/api/cityflow/activity")
+    def cityflow_activity():
+        """What this run has actually observed and concluded, per vehicle.
+
+        Everything here accumulated as the replay played. Nothing is
+        precomputed and nothing is known about a car before the clock reaches
+        it, which is the point: the browse list can offer "cars this run has
+        actually seen" and "cars it has actually reasoned about" without either
+        being a claim that the data was analysed in advance.
+
+        `reasoned` is zero for every vehicle until something is flagged --
+        with no targets there is nothing to compare a sighting against. The
+        console says so rather than showing an empty grid.
+        """
+        return {
+            "targets_flagged": len(state.tracker.targets()),
+            "vehicles": state.vehicle_activity,
+        }
 
     @app.get("/api/cityflow/{scenario}/vehicles/{vehicle_id}/gallery")
     def cityflow_vehicle_gallery(scenario: str, vehicle_id: int):

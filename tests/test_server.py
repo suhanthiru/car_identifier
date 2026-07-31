@@ -56,6 +56,61 @@ def test_world_endpoints(client):
     assert all(e["min_s"] < e["max_s"] for e in adjacency)
 
 
+def test_activity_reports_only_what_the_run_has_actually_done(client):
+    """The browse list's default filter selects on this, so it must describe
+    the RUN and not the dataset.
+
+    Before any sighting it is empty: nothing is known about a car until a
+    camera reports it. That is the property that keeps the console from
+    implying the footage was analysed in advance.
+    """
+    empty = client.get("/api/cityflow/activity").json()
+    assert empty == {"targets_flagged": 0, "vehicles": {}}
+
+    client.post("/api/sightings", json=sighting(event_id="e1", eval_truth_id="42"))
+    seen = client.get("/api/cityflow/activity").json()["vehicles"]
+    assert seen["42"]["sightings"] == 1
+    assert seen["42"]["cameras"] == ["cam-ctr"]
+    # No target is flagged, so there was nothing to compare against and the
+    # run has reasoned about precisely nothing.
+    assert seen["42"]["considered"] == 0
+
+    # A second camera reporting the same vehicle accumulates rather than resets.
+    client.post("/api/sightings", json=sighting(
+        event_id="e2", camera_id="cam-n", t=1010.0, eval_truth_id="42"))
+    seen = client.get("/api/cityflow/activity").json()["vehicles"]
+    assert seen["42"]["sightings"] == 2
+    assert sorted(seen["42"]["cameras"]) == ["cam-ctr", "cam-n"]
+
+
+def test_activity_counts_the_cascades_decisions_once_a_target_exists(client):
+    """With something flagged, sightings are actually reasoned about — and the
+    per-vehicle record says so, which is what "reasoned about this run" filters
+    on."""
+    client.post("/api/targets", json={"label": "silver camry", "plate": PLATE})
+    client.post("/api/sightings", json=sighting(event_id="e1", eval_truth_id="7"))
+    body = client.get("/api/cityflow/activity").json()
+    assert body["targets_flagged"] == 1
+    row = body["vehicles"]["7"]
+    assert row["considered"] >= 1, "a flagged target must produce a comparison"
+    decided = row["rejected"] + row["reviewed"] + row["matched"] + row["undecided"]
+    assert decided >= 1, "every comparison must land in exactly one bucket"
+
+
+def test_activity_resets_with_the_run(client):
+    """A restart rewinds the clock, so the run's record of what it saw has to
+    go with it — otherwise the browse list credits the new run with the old
+    one's sightings.
+
+    reset_runtime() is called directly: POST /api/reset only raises a flag for
+    start.py's feed supervisor, which does not exist under TestClient.
+    """
+    client.post("/api/sightings", json=sighting(eval_truth_id="9"))
+    assert client.get("/api/cityflow/activity").json()["vehicles"]
+    client.app.state.reset_runtime()
+    assert client.get("/api/cityflow/activity").json()["vehicles"] == {}
+
+
 def test_world_source_defaults_synthetic(client):
     assert client.get("/api/world_source").json() == {"source": "synthetic"}
 

@@ -80,6 +80,9 @@ class FleetTracker:
         # target_id -> what the cascade has concluded about it so far. Lets the
         # console distinguish "examined and rejected" from "never looked at".
         self._attention: dict[str, dict] = {}
+        # Verdict tallies for the single most recent observation; see
+        # last_verdicts(). Per-sighting, where _attention is per-target.
+        self._last_verdicts: dict[str, int] = {}
         self._reviews: dict[str, PendingReview] = {}
         self._review_seq = itertools.count(1)
 
@@ -153,7 +156,19 @@ class FleetTracker:
             else:
                 a["undecided"] = a.get("undecided", 0) + 1
 
+    def last_verdicts(self) -> dict[str, int]:
+        """What the cascade concluded about the observation just processed.
+
+        Per-TARGET attention already exists (`snapshot`); this is the same
+        evidence viewed per-SIGHTING, which is what lets the browse list offer
+        "cars this run has actually reasoned about" instead of a fact about the
+        footage. Empty dict when nothing is flagged: with no targets there is
+        nothing to compare against and no reasoning to report.
+        """
+        return dict(self._last_verdicts)
+
     def process_observation(self, obs: Observation) -> list[TrackerEvent]:
+        self._last_verdicts = {}
         if not self._targets:
             return []
         ranked = rank_candidates(
@@ -161,6 +176,24 @@ class FleetTracker:
             self._graph, self._cascade_config,
         )
         self._record_attention(ranked)
+        for d in getattr(ranked, "all_decisions", ()) or ():
+            self._last_verdicts["considered"] = \
+                self._last_verdicts.get("considered", 0) + 1
+            if d.verdict == VERDICT_REJECTED:
+                self._last_verdicts["rejected"] = \
+                    self._last_verdicts.get("rejected", 0) + 1
+            elif d.requires_review:
+                self._last_verdicts["reviewed"] = \
+                    self._last_verdicts.get("reviewed", 0) + 1
+            elif d.verdict in (VERDICT_CONFIRMED, VERDICT_LIKELY):
+                self._last_verdicts["matched"] = \
+                    self._last_verdicts.get("matched", 0) + 1
+            else:
+                self._last_verdicts["undecided"] = \
+                    self._last_verdicts.get("undecided", 0) + 1
+            if any(f.kind == "veto" for f in d.facts):
+                self._last_verdicts["vetoed"] = \
+                    self._last_verdicts.get("vetoed", 0) + 1
         best = ranked.best
         events: list[TrackerEvent] = []
 

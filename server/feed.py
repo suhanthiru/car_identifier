@@ -53,14 +53,29 @@ class FeedClock:
         self._state = state
         self._start = start if start is not None else asyncio.get_running_loop().time()
         self._paused_total = 0.0
-        self._paused_since: float | None = None
+        # Already paused at construction? Then the pause began AT the start,
+        # not whenever the first task got round to noticing. _sync() only ever
+        # starts counting from the moment it observes, so without this the
+        # interval between construction and the first sync is silently spent.
+        # The console starts paused, which makes that the normal case.
+        self._paused_since: float | None = self._start if self.paused else None
 
     @property
     def paused(self) -> bool:
         return bool(getattr(self._state, "feed_paused", False))
 
     def elapsed(self) -> float:
-        """Wall seconds since start, excluding time spent paused."""
+        """Wall seconds since start, excluding time spent paused.
+
+        Syncs first. Pause bookkeeping used to happen only inside
+        `wait_until`, so a clock CONSTRUCTED while already paused had no
+        `_paused_since` recorded and counted the wall time until some task
+        happened to wait. The console now starts paused, which made that the
+        normal case: an untouched replay opened reading t+00:02 instead of
+        t+00:00, and the toolbar could not tell "not started yet" from "paused
+        mid-run" because the clock claimed time had passed.
+        """
+        self._sync()
         now = asyncio.get_running_loop().time()
         frozen = self._paused_total
         if self._paused_since is not None:
