@@ -697,3 +697,12 @@ table.dossier-table th { color: var(--dim); font-weight: 600; }
 /* The hint carries the target, belief and track state, so it keeps earning
    its place in the bar when everything else is hidden. */
 .rp-toggle .panel-hint { margin-left: auto; }
+
+/* A review that can no longer be resolved. It used to throw an unhandled
+   rejection and leave the card looking pending forever, so clicking Accept
+   did nothing visible and only a restart cleared it. */
+.review-card.review-gone { opacity: .55; border-color: var(--line); }
+.review-note-gone {
+  margin-top: 6px; padding: 5px 8px; border-radius: 2px;
+  background: #2a1e12; color: #d0a06a; font-size: 10.5px; line-height: 1.45;
+}

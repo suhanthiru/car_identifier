@@ -20,6 +20,7 @@ import base64
 import binascii
 import dataclasses
 import itertools
+import shutil
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeout
@@ -267,6 +268,9 @@ def create_app(
     # Shared lazy embedder for photo-seeded flags (see _flag_embedder below);
     # tests may inject a stub here to avoid the model load.
     state.flag_embedder = None
+    # Guards the lazy build above, so concurrent flags share one model load
+    # instead of each starting their own.
+    state.flag_embedder_lock = threading.Lock()
 
     # Real-clip mode only: the CityFlow scenario this server instance is
     # actively replaying (server/real_feed.py), if any. Set once at
@@ -609,14 +613,23 @@ def create_app(
     # ------------------------------------------------------------ targets
 
     def _flag_embedder():
-        # Lazy: only flags that carry a reference photo pay the model load,
-        # and one shared instance serves them all (ReidEmbedder locks its
-        # own lazy load, same as the edge tier's shared embedder).
-        if state.flag_embedder is None:
-            from perception.embedder import ReidEmbedder
+        """The one shared ReID embedder used to seed flags from photos.
 
-            state.flag_embedder = ReidEmbedder()
-        return state.flag_embedder
+        Lazy, so only flags carrying a reference photo pay the model load —
+        and built under a lock, because the check-then-set was a race. Flagging
+        several cars at once (four clicks in the browse grid inside a second)
+        had every request find `None` and cold-load its own torchreid model:
+        four full model loads competing for the same CPU instead of one, and
+        four browse tiles stuck spinning with no error and no progress for over
+        ninety seconds. ReidEmbedder locks its own internal lazy load, which is
+        exactly the guarantee this discarded by constructing several of them.
+        """
+        with state.flag_embedder_lock:
+            if state.flag_embedder is None:
+                from perception.embedder import ReidEmbedder
+
+                state.flag_embedder = ReidEmbedder()
+            return state.flag_embedder
 
     def _seed_profile_from_photo(profile, png_bytes: bytes,
                                  extra_pngs: list[bytes] = ()):
@@ -834,11 +847,49 @@ def create_app(
     def unflag_target(target_id: str):
         with state.tracker_lock:
             state.tracker.unflag_target(target_id)
-        # Previously wrote nothing — an untraceable deletion. Now audited.
         with Session(engine) as session:
+            # Retire this target's pending reviews with it.
+            #
+            # unflag_target drops the review from the tracker's in-memory dict
+            # but left the ReviewRow marked "pending", so the queue kept
+            # showing cards for a target that no longer existed — and
+            # resolving one 404'd, because the tracker had already forgotten
+            # it. The card then sat there unreviewable until a restart. A
+            # review of a deleted target is not pending; nobody can act on it.
+            orphans = session.exec(
+                select(dbm.ReviewRow)
+                .where(dbm.ReviewRow.target_id == target_id)
+                .where(dbm.ReviewRow.status == "pending")).all()
+            for row in orphans:
+                row.status = "dropped"
+                session.add(row)
+            # Previously wrote nothing — an untraceable deletion. Now audited.
             audit_record(session, "operator", "unflag_target",
-                         {"target_id": target_id}, state.sim_now)
+                         {"target_id": target_id,
+                          "reviews_dropped": len(orphans)}, state.sim_now)
             session.commit()
+        # The reconstruction outlives its target otherwise: target ids restart
+        # at tgt-001 each run, so an orphaned directory is silently adopted by
+        # whatever is flagged next — the same contamination _reset() exists to
+        # prevent between runs.
+        #
+        # Stop the fusion first. Deleting a target seconds after flagging it
+        # means the worker is still mid-reconstruction with those files open,
+        # and on Windows rmtree then fails — which, with ignore_errors=True and
+        # nothing checking afterwards, left the directory in place and reported
+        # success. A cleanup that cannot fail visibly is not a cleanup.
+        job = state.car3d_jobs.pop(target_id, None)
+        if job is not None and not job.cancel():
+            try:
+                job.result(timeout=10)
+            except Exception:            # noqa: BLE001 — already reported
+                pass
+        model_dir = Path(state.targets3d_dir) / target_id
+        if model_dir.is_dir():
+            shutil.rmtree(model_dir, ignore_errors=True)
+            if model_dir.exists():
+                print(f"car3d: could not remove {model_dir} for the deleted "
+                      f"target; it will be cleared on the next restart")
 
     # ---------------------------------------------------------- sightings
 
@@ -1693,14 +1744,26 @@ def create_app(
         # finished. A panel that blocks the page it lives on is worse than a
         # panel that says "still building".
         building = not _await_fusion(target_id, timeout=1.5)
+        # Re-check: the wait above releases nothing, so an operator can delete
+        # this target while we sit in it. Without this the request answered
+        # 200 with a full model for a target that no longer existed — measured
+        # at 213s after the DELETE had already returned 204.
+        if target_id not in state.tracker.targets():
+            raise HTTPException(404, "unknown target")
         model = Target3DModel(target_id, state.targets3d_dir)
         if not model.exists():
             return {"exists": False, "enabled": state.enable_3d,
                     "building": building}
         asset = model.load()
         sig = signature_from_cloud(asset.cloud)
-        # Derived artefacts are produced here rather than per fusion.
-        model.ensure_turntable(provenance_overlay=True)
+        # Six CPU renders, and the reason this endpoint measured 213s under
+        # concurrent-flag load despite its 1.5s wait cap: the cap bounds the
+        # WAIT, and this ran afterwards, competing with the fusion worker for
+        # the same CPU. Handed to the same single-worker executor the fusions
+        # use, so the status request returns immediately and the turntable is
+        # ready by the time the image is actually fetched.
+        if model.turntable_is_stale():
+            state.car3d_executor.submit(model.ensure_turntable, True)
         return {
             "exists": True, "enabled": state.enable_3d,
             "observations": len(asset.observations),

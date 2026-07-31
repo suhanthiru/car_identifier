@@ -250,6 +250,18 @@ class Target3DModel:
         if self.exists() and self._is_stale(self.dir / "exports" / "model.splat"):
             self._export(self.load())
 
+    def turntable_is_stale(self, provenance_overlay: bool = True) -> bool:
+        """Would ensure_turntable() actually do work? A file stat, no render.
+
+        Lets a request decide whether to render inline or hand the job to a
+        worker, without paying six CPU renders to find out. The status
+        endpoint asks this on every dossier open.
+        """
+        if not self.exists():
+            return False
+        name = ("turntable_provenance.png" if provenance_overlay else "turntable.png")
+        return self._is_stale(self.dir / "exports" / name)
+
     def ensure_turntable(self, provenance_overlay: bool = True) -> Path | None:
         """Regenerate the dossier turntable if the cloud has moved on."""
         if not self.exists():

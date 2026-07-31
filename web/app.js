@@ -841,6 +841,29 @@ async function pollActivity() {
   setInterval(tick, 2000);
 }
 
+/** Keep a tile's "flagged ✓" honest against the live target list.
+ *
+ * The class was set once on click and never checked again, so deleting the
+ * target left its tile permanently ticked. Clicking it then correctly refused
+ * (the duplicate guard fired) — which meant the operator could not re-flag
+ * that vehicle at all from that browse list, while the tile went on claiming
+ * the car was tracked, until a reload. A tile that asserts a server fact has
+ * to keep agreeing with the server.
+ *
+ * Matched on the label the flag path writes, which is the only link between a
+ * browse tile and the target it created.
+ */
+function reconcileFlaggedTile(tile, v) {
+  if (!tile.classList.contains("flagged")) return;
+  const needle = `vehicle ${v.vehicle_id} (`;
+  const stillFlagged = Object.values(latestSnapshot || {})
+    .some((t) => (t.label || "").startsWith(needle));
+  if (!stillFlagged) {
+    tile.classList.remove("flagged");
+    tile.title = `Flag vehicle ${v.vehicle_id}`;
+  }
+}
+
 /** The right-hand chip on a browse tile.
  *
  * Prefers what THIS RUN did over what the dataset says. A tally of sightings
@@ -922,6 +945,7 @@ function renderVehicleTiles(vehicles) {
       const span = existing.querySelector(".vt-watch");
       const fresh = watchBadge(v);
       if (span && span.outerHTML !== fresh) span.outerHTML = fresh;
+      reconcileFlaggedTile(existing, v);
       return;
     }
     const tile = document.createElement("div");
@@ -1542,10 +1566,33 @@ function expandAnomalyCard(card, r) {
 }
 
 async function resolveReview(reviewId, accept) {
-  await api(`/api/reviews/${reviewId}/resolve`, {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ accept }),
-  });
+  // A failed resolve must say so and clear the card.
+  //
+  // This had no catch, so resolving a review whose target had since been
+  // deleted threw an unhandled rejection into the console and left the card
+  // sitting in the queue looking pending — clicking Accept did nothing,
+  // visibly, forever, and only a restart cleared it. Deleting a target now
+  // retires its reviews server-side, so this should be rare; when it does
+  // happen the operator gets told rather than ignored.
+  try {
+    await api(`/api/reviews/${reviewId}/resolve`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ accept }),
+    });
+  } catch (e) {
+    setBanner
+      && console.warn(`resolve ${reviewId} failed:`, e && e.message);
+    const card = document.querySelector(`[data-review="${CSS.escape(reviewId)}"]`);
+    if (card) {
+      card.classList.add("review-gone");
+      card.querySelector(".rc-actions")?.remove();
+      const note = document.createElement("div");
+      note.className = "review-note-gone";
+      note.textContent = "This review can no longer be resolved — its target "
+        + "was deleted. Removing it from the queue.";
+      card.appendChild(note);
+    }
+  }
   refreshReviews();
 }
 
