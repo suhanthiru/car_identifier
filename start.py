@@ -132,6 +132,21 @@ def _wait_for_server(base: str, timeout_s: float = 60.0) -> None:
     raise RuntimeError(f"server did not come up within {timeout_s:.0f}s ({last})")
 
 
+def _instance_suffix() -> str:
+    """Per-instance suffix for the runtime data paths, from --instance.
+
+    The database, crops and 3D directories were fixed names, so a second
+    console on a second port silently shared all three with the first. Three
+    launched together raced each other's `_reset` + `create_all` and two died
+    on `sqlite3.OperationalError: table targets already exists` — a raw
+    traceback, with nothing to suggest the real cause was another instance.
+    Empty by default, so the normal single-console path is unchanged.
+    """
+    raw = os.environ.get("EYES_INSTANCE", "").strip()
+    safe = "".join(c for c in raw if c.isalnum() or c in "-_")
+    return f"-{safe}" if safe else ""
+
+
 def _reset(db_path: Path, crops_dir: Path, targets3d_dir: Path | None = None) -> Path:
     """Clear the previous run so each launch starts clean. Falls back to a
     timestamped DB if another process still holds the file open.
@@ -161,9 +176,13 @@ def run_synthetic(port: int, time_scale: float, open_browser: bool) -> None:
     from server.feed import FeedConfig, run_feed
     from sim.emitter import build_default_world
 
-    db_path = _reset(Path("data/eyes.sqlite"), Path("data/crops"),
-                     Path("data/targets3d"))
-    app = create_app(db_url=f"sqlite:///{db_path.as_posix()}")
+    inst = _instance_suffix()
+    crops_dir = f"data/crops{inst}"
+    db_path = _reset(Path(f"data/eyes{inst}.sqlite"), Path(crops_dir),
+                     Path(f"data/targets3d{inst}"))
+    app = create_app(db_url=f"sqlite:///{db_path.as_posix()}",
+                     crops_dir=crops_dir,
+                     targets3d_dir=f"data/targets3d{inst}")
     server = _serve(app, port)
     base = f"http://127.0.0.1:{port}"
     _wait_for_server(base)
@@ -213,12 +232,14 @@ def run_cityflow(port: int, time_scale: float, open_browser: bool, scenario: str
     # Separate 3D directory per mode, for the same reason crops are separate:
     # a synthetic sprite's model and a real vehicle's model must never share
     # a target id's directory.
-    db_path = _reset(Path("data/eyes-cityflow.sqlite"), Path("data/crops-cityflow"),
-                     Path("data/targets3d-cityflow"))
+    inst = _instance_suffix()
+    crops_dir, models_dir = f"data/crops-cityflow{inst}", f"data/targets3d-cityflow{inst}"
+    db_path = _reset(Path(f"data/eyes-cityflow{inst}.sqlite"), Path(crops_dir),
+                     Path(models_dir))
     app = create_app(
         graph=graph, db_url=f"sqlite:///{db_path.as_posix()}",
-        crops_dir="data/crops-cityflow", world_source="real",
-        targets3d_dir="data/targets3d-cityflow",
+        crops_dir=crops_dir, world_source="real",
+        targets3d_dir=models_dir,
         calibration_path=str(calibration) if calibration.is_file() else "",
         cityflow_root=root, cityflow_scenario_name=scenario)
     server = _serve(app, port)
@@ -430,6 +451,10 @@ def main() -> None:
                              "(default 8 synthetic, 4 CityFlow)")
     parser.add_argument("--port", type=int, default=8010)
     parser.add_argument("--no-browser", action="store_true")
+    parser.add_argument("--instance", default="",
+                        help="name this instance so its database, crops and 3D "
+                             "models do not collide with another console's "
+                             "(required to run two at once on different ports)")
     parser.add_argument("--no-3d", action="store_true",
                         help="skip the 3D panel even if cargen is installed")
     parser.add_argument("--3d-identification", dest="three_d_identification",
@@ -473,6 +498,8 @@ def main() -> None:
     # 3D is opt-out rather than opt-in here: the whole point of one command is
     # that you see everything the machine can actually do.
     enable_3d = cargen[0] and not args.no_3d
+    if args.instance:
+        os.environ["EYES_INSTANCE"] = args.instance
     os.environ["EYES_ENABLE_3D"] = "1" if enable_3d else "0"
     # Visual by default, evidential only on request — the ablation measured the
     # geometry channel removing correct matches and no incorrect ones.
