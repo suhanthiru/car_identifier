@@ -1,4 +1,6 @@
 """bbox_for + VideoFrameSource against a tiny generated fixture video."""
+import threading
+import time
 from unittest.mock import patch
 
 import cv2
@@ -114,6 +116,54 @@ def test_crop_then_frame_at_same_frame_still_decodes(tmp_path):
     assert img is not None
     assert img.shape[:2] == (FRAME_H, FRAME_W)
     src.close()
+
+
+def test_close_racing_a_reader_does_not_crash(tmp_path):
+    """close() must not release the capture out from under a reader.
+
+    Releasing a cv2.VideoCapture while another thread is inside set()/read()
+    is an access violation: the process dies with no Python exception and no
+    traceback. A replay restart does exactly that — it tears down the feed's
+    RealPerceptor and closes its sources while `asyncio.to_thread` workers
+    from the outgoing run are still inside crop(). Caught with the fault
+    handler armed after repeated resets:
+
+        Windows fatal exception: access violation
+          File "datasets/cityflow_video.py", line 176 in crop
+          File "perception/real_observe.py", line 124 in process
+
+    This cannot assert "did not segfault" from inside the process it would
+    kill — if the lock is removed, this test takes the whole pytest run down
+    rather than failing. That is the honest shape of the check.
+    """
+    video_path = tmp_path / "vdo.avi"
+    make_video(video_path, n_frames=5)
+    src = VideoFrameSource(video_path)
+    src.crop(0, (2, 2, 10, 8))          # open the handle first
+
+    stop = threading.Event()
+    errors: list[BaseException] = []
+
+    def reader():
+        while not stop.is_set():
+            try:
+                src.crop(1, (2, 2, 10, 8))
+                src.frame_at(2)
+            except Exception as exc:     # noqa: BLE001 — recorded, not raised
+                errors.append(exc)
+                return
+
+    threads = [threading.Thread(target=reader, daemon=True) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for _ in range(25):
+        src.close()                      # racing the readers, repeatedly
+        time.sleep(0.002)
+    stop.set()
+    for t in threads:
+        t.join(timeout=5)
+    src.close()
+    assert not errors, f"reader raised while close() raced it: {errors[:3]}"
 
 
 def test_video_frame_source_missing_file_raises(tmp_path):

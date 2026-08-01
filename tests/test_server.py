@@ -152,6 +152,38 @@ def test_activity_counts_the_cascades_decisions_once_a_target_exists(client):
     assert decided >= 1, "every comparison must land in exactly one bucket"
 
 
+def test_activity_buckets_always_sum_to_considered(client):
+    """Every comparison lands in exactly one bucket, including when it raises
+    a review.
+
+    `reviewed` was incremented twice for the same decision — once from the
+    cascade's verdict tally and again from the emitted review event — so
+    rejected+reviewed+matched+undecided exceeded `considered`. That sum is
+    presented as a complete account of what the run did about a vehicle, in
+    the browse list's "reasoned about" filter and in the cascade panel; when
+    it does not add up, the account is wrong. A 10-minute soak caught it 1,175
+    times.
+    """
+    client.post("/api/targets", json={"label": "silver camry", "plate": PLATE,
+                                      "class_attrs": dict(CAMRY),
+                                      "instance_attrs": {"accessory": "roof rack"}})
+    # A mix: a plate-confirmed hit, and an attribute-only one that reviews.
+    client.post("/api/sightings", json=sighting(event_id="s1", eval_truth_id="11"))
+    body = sighting(event_id="s2", plate=None, t=1010.0, eval_truth_id="12")
+    body["instance_attrs"] = {"accessory": "roof rack"}
+    client.post("/api/sightings", json=body)
+    client.post("/api/sightings", json=sighting(
+        event_id="s3", plate=None, t=1020.0, eval_truth_id="13"))
+
+    vehicles = client.get("/api/cityflow/activity").json()["vehicles"]
+    assert vehicles, "no activity recorded at all"
+    for vid, a in vehicles.items():
+        total = a["rejected"] + a["reviewed"] + a["matched"] + a["undecided"]
+        assert a["considered"] == total, (
+            f"vehicle {vid}: considered={a['considered']} but buckets sum to "
+            f"{total} ({a})")
+
+
 def test_activity_resets_with_the_run(client):
     """A restart rewinds the clock, so the run's record of what it saw has to
     go with it — otherwise the browse list credits the new run with the old

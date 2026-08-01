@@ -1015,12 +1015,22 @@ def create_app(
         for ev in events:
             if ev.kind == "review":
                 c["reviews_raised"] += 1
-                act["reviewed"] = act.get("reviewed", 0) + 1
+                # NOT act["reviewed"]: the verdict tally above already counted
+                # this decision, in exactly one bucket. Adding it again here
+                # double-counted every review, so `considered` no longer
+                # equalled rejected+reviewed+matched+undecided — the arithmetic
+                # the browse list's "reasoned about" filter and the cascade
+                # panel both present as a complete account of what the run did.
+                # A 10-minute soak flagged it 1,175 times before I saw it once.
             elif ev.kind == "alert":
                 c["alerts"] += 1
                 act["alerts"] += 1
             if ev.detail.get("refused_to_individuate"):
                 c["refusals"] += 1
+                # Same reasoning: a refusal is already in the reviewed bucket
+                # (refused_to_individuate always requires review), so the
+                # per-vehicle count here is kept only as a separate label, not
+                # added into the buckets that must sum to `considered`.
                 act["refusals"] += 1
 
     def _hops_from(obs) -> list[dict]:

@@ -11,6 +11,7 @@ Two small, focused pieces used by the K live console's real feed:
 """
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 
 import numpy as np
@@ -79,7 +80,28 @@ def bbox_for(gt_path: Path, frame: int, vehicle_id: int) -> tuple[int, int, int,
 
 
 class VideoFrameSource:
-    """One reused `cv2.VideoCapture` handle for a single camera's video."""
+    """One reused `cv2.VideoCapture` handle for a single camera's video.
+
+    Every method that touches the handle takes `self._lock`, INCLUDING
+    `close()`. Releasing a `cv2.VideoCapture` while another thread is inside
+    `set()` or `read()` on it is an access violation — the process dies with
+    no Python exception and no traceback.
+
+    That is not hypothetical. A replay restart tears down the feed's
+    RealPerceptor and closes its sources, while `asyncio.to_thread` workers
+    from the outgoing run can still be inside `crop()`. Caught with the fault
+    handler armed after repeated resets:
+
+        Windows fatal exception: access violation
+        Current thread (most recent call first):
+          File "datasets/cityflow_video.py", line 176 in crop
+          File "perception/real_observe.py", line 124 in process
+          ... concurrent.futures worker
+
+    The frame endpoint already guarded its own copies with an external
+    per-camera lock for exactly this reason; the feed's copies had nothing.
+    Owning the lock here means a caller cannot forget it.
+    """
 
     def __init__(self, video_path: Path):
         self._path = video_path
@@ -87,6 +109,8 @@ class VideoFrameSource:
         self._pos: int | None = None      # last decoded frame, for frame_at
         self._last: np.ndarray | None = None   # that frame's pixels, for re-asks
         self._n_frames: int | None = None      # container frame count, 0 = unknown
+        # Reentrant: frame_at() calls frame_count(), which also takes it.
+        self._lock = threading.RLock()
 
     def _capture(self):
         import cv2
@@ -111,13 +135,14 @@ class VideoFrameSource:
         """
         import cv2
 
-        if self._n_frames is None:
-            try:
-                self._n_frames = max(0, int(
-                    self._capture().get(cv2.CAP_PROP_FRAME_COUNT)))
-            except Exception:            # noqa: BLE001 — treat as "unknown"
-                self._n_frames = 0
-        return self._n_frames
+        with self._lock:
+            if self._n_frames is None:
+                try:
+                    self._n_frames = max(0, int(
+                        self._capture().get(cv2.CAP_PROP_FRAME_COUNT)))
+                except Exception:        # noqa: BLE001 — treat as "unknown"
+                    self._n_frames = 0
+            return self._n_frames
 
     def frame_at(self, frame: int) -> np.ndarray | None:
         """Whole frame `frame`, decoding forward when that is cheaper.
@@ -140,13 +165,18 @@ class VideoFrameSource:
         """
         import cv2
 
-        cap = self._capture()
-        if frame == self._pos and self._last is not None:
-            return self._last
-        # Cheap rejection before the decoder is touched at all.
-        n = self.frame_count()
-        if frame < 0 or (n and frame >= n):
-            return None
+        with self._lock:
+            cap = self._capture()
+            if frame == self._pos and self._last is not None:
+                return self._last
+            # Cheap rejection before the decoder is touched at all.
+            n = self.frame_count()
+            if frame < 0 or (n and frame >= n):
+                return None
+            return self._decode_to(cap, frame, cv2)
+
+    def _decode_to(self, cap, frame: int, cv2):
+        """Forward-read or seek to `frame`. Caller holds the lock."""
         current = self._pos
         # Strictly ahead: frame == current with no cached pixels means the
         # decoder has already consumed it, so that must seek, not read.
@@ -172,6 +202,10 @@ class VideoFrameSource:
     def crop(self, frame: int, bbox: tuple[int, int, int, int]) -> np.ndarray | None:
         import cv2
 
+        with self._lock:
+            return self._crop_locked(frame, bbox, cv2)
+
+    def _crop_locked(self, frame, bbox, cv2) -> np.ndarray | None:
         cap = self._capture()
         cap.set(cv2.CAP_PROP_POS_FRAMES, frame)
         ok, img = cap.read()
@@ -190,8 +224,12 @@ class VideoFrameSource:
         return crop if crop.size else None
 
     def close(self) -> None:
-        if self._cap is not None:
-            self._cap.release()
-            self._cap = None
-        self._pos = None
-        self._last = None
+        # Under the lock: this is the release that crashed the process when it
+        # landed while a worker was mid-read. Waiting for the in-flight decode
+        # costs milliseconds; not waiting costs the whole server.
+        with self._lock:
+            if self._cap is not None:
+                self._cap.release()
+                self._cap = None
+            self._pos = None
+            self._last = None
