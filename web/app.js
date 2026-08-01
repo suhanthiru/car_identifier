@@ -849,6 +849,42 @@ async function pollActivity() {
   setInterval(tick, 2000);
 }
 
+/** The turntable is rendered in the background, so it can be a few seconds
+ * behind the dossier that links to it.
+ *
+ * The image element used to just fail and leave an empty framed box with no
+ * caption — indistinguishable from a reconstruction that had failed outright,
+ * on a model that was in fact finished and merely mid-render. Say what is
+ * happening and come back for it.
+ */
+function turntableRetry(img) {
+  const tries = Number(img.dataset.tries || 0) + 1;
+  img.dataset.tries = String(tries);
+  const box = img.parentElement;
+  if (tries > 12) {                       // ~40s; something is actually wrong
+    img.style.display = "none";
+    box.innerHTML = `<div class="recon-pending">The reconstruction could not
+      be rendered. The model itself is intact — its exports are still linked
+      below.</div>`;
+    return;
+  }
+  img.style.display = "none";
+  if (!box.querySelector(".recon-pending")) {
+    const note = document.createElement("div");
+    note.className = "recon-pending";
+    note.textContent = "Rendering the reconstruction…";
+    box.appendChild(note);
+  }
+  setTimeout(() => {
+    const src = img.getAttribute("src").split("?")[0];
+    img.onload = () => {
+      img.style.display = "";
+      box.querySelector(".recon-pending")?.remove();
+    };
+    img.src = `${src}?r=${tries}`;        // defeat the negative cache
+  }, Math.min(1000 * tries, 5000));
+}
+
 /** Keep a tile's "flagged ✓" honest against the live target list.
  *
  * The class was set once on click and never checked again, so deleting the
@@ -1708,7 +1744,10 @@ async function openDossier(targetId) {
       <div class="dossier-section-label">${model3d.feeds_identification
         ? `Reconstruction — <b>feeding identification</b> (--3d-identification)`
         : `Reconstruction (visual only — never used as identity evidence)`}</div>
-      <div class="dossier-recon"><img src="${model3d.turntable}" alt="turntable with provenance overlay"></div>
+      <div class="dossier-recon"><img src="${model3d.turntable}"
+        alt="turntable with provenance overlay"
+        onerror="turntableRetry(this)"
+        data-tries="0"></div>
       <div class="dossier-legend">
         <span><span class="sw sw-good"></span>confirmed (${Math.round(model3d.observed_fraction * 100)}% of structure)</span>
         <span><span class="sw sw-guess"></span>generative-prior guess</span>

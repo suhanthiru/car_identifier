@@ -706,3 +706,11 @@ table.dossier-table th { color: var(--dim); font-weight: 600; }
   margin-top: 6px; padding: 5px 8px; border-radius: 2px;
   background: #2a1e12; color: #d0a06a; font-size: 10.5px; line-height: 1.45;
 }
+
+/* The turntable renders in the background, so it can lag the dossier that
+   links to it. An empty framed box reads as a failed reconstruction; this
+   says which it is. */
+.recon-pending {
+  padding: 18px 12px; text-align: center; color: var(--dim);
+  font-size: 11px; line-height: 1.5;
+}

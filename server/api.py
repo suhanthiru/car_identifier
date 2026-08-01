@@ -1814,13 +1814,28 @@ def create_app(
         # cannot make us do work outside the export directory.
         if base not in path.parents:
             raise HTTPException(404, "no such model file")
-        _await_fusion(target_id)
+        # Bounded, like the status endpoint beside it. This kept the 300s
+        # default after that one was capped, and this is the route an <img>
+        # actually loads — so the dossier's reconstruction pane sat blank and
+        # silent while the request hung, on a target whose turntable was
+        # already sitting finished on disk. Measured: 60s with no response.
+        settled = _await_fusion(target_id, timeout=2.0)
         model = Target3DModel(target_id, state.targets3d_dir)
         if name.endswith(".png"):
-            model.ensure_turntable(provenance_overlay="provenance" in name)
+            # Render inline only if nothing else is queued behind it; otherwise
+            # say "not yet" and let the client come back. Six CPU renders
+            # behind a fusion is exactly the wait that produced the blank pane.
+            if settled and model.turntable_is_stale("provenance" in name):
+                model.ensure_turntable(provenance_overlay="provenance" in name)
         elif name.endswith((".splat", ".ply")):
             model.ensure_exports()
         if not path.is_file():
+            # 409, not 404: the model exists and this asset is coming. A 404
+            # means "there is nothing here", which the console would render as
+            # a permanently missing reconstruction rather than a pending one.
+            if model.exists():
+                raise HTTPException(
+                    409, "reconstruction is still rendering; retry shortly")
             raise HTTPException(404, "no such model file")
         # A model export (.splat/.ply) leaves the system — audit it. Turntable
         # PNGs are UI and not logged.
