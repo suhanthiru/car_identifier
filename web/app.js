@@ -1693,6 +1693,69 @@ function showDossierView() {
   document.getElementById("side-dossier").classList.remove("hidden");
 }
 
+/* Coalesce snapshot renders to one per frame.
+ *
+ * A snapshot is broadcast for every ingested sighting — measured at 8.6 per
+ * second on S01 at 4x, and five cameras can burst well above that. Each one
+ * repainted the map markers and the whole target list. The console only
+ * changes visibly at about 1Hz, so most of that work was thrown away before
+ * anyone saw it, and it competed with the browser's own compositing.
+ *
+ * requestAnimationFrame collapses a burst into a single repaint and stops
+ * entirely when the tab is not visible, which is the correct behaviour for a
+ * view nobody is looking at.
+ */
+let snapshotRenderQueued = false;
+function scheduleSnapshotRender() {
+  if (snapshotRenderQueued) return;
+  snapshotRenderQueued = true;
+  requestAnimationFrame(() => {
+    snapshotRenderQueued = false;
+    renderTargetsOnMap(latestSnapshot);
+    renderTargetList(latestSnapshot);
+    if (openDossierId && latestSnapshot[openDossierId]) {
+      refreshOpenDossier(latestSnapshot[openDossierId]);
+    }
+  });
+}
+
+/* Keep an open dossier current WITHOUT rebuilding it.
+ *
+ * Every snapshot broadcast used to call openDossier() again, and broadcasts
+ * fire on every ingested sighting — several a second. Each of those re-ran
+ * GET /api/targets/{id}, which is four DB queries plus an audit write and a
+ * commit; then GET .../model3d, which waits on the fusion worker; then threw
+ * away and rebuilt the whole panel's DOM, clip players included. That is why
+ * an open profile felt like treacle, and why the audit log filled with
+ * "operator viewed dossier" entries for a dossier the operator opened once.
+ *
+ * Everything that actually changes sighting-to-sighting — track state and
+ * belief — is already in the snapshot. So update those two spans in place and
+ * make no request at all. The parts that need a fetch (attributes, profile
+ * versions, the corroboration chain, the reconstruction) only move on a
+ * profile update, which is rare and re-opens the panel properly.
+ */
+function refreshOpenDossier(live) {
+  const state = document.getElementById("d-state");
+  const sub = document.getElementById("d-sub");
+  if (!state || !sub) return;
+  // A profile version bump means the evidence itself moved — new attributes, a
+  // new corroboration link, a fused view. That genuinely needs the full fetch,
+  // and it happens rarely rather than several times a second.
+  const shown = Number((sub.textContent.match(/profile v(\d+)/) || [])[1] ?? -1);
+  if (live.profile_version != null && live.profile_version !== shown) {
+    openDossier(openDossierId);
+    return;
+  }
+  const label = (live.state || "?").toUpperCase();
+  if (state.textContent !== label) {
+    state.textContent = label;
+    state.className = `d-state ${live.state || "lost"}`;
+  }
+  sub.textContent = sub.textContent.replace(
+    /belief [\d.]+/, `belief ${live.belief ?? 0}`);
+}
+
 async function openDossier(targetId) {
   openDossierId = targetId;
   const d = await api(`/api/targets/${targetId}`);
@@ -1782,9 +1845,9 @@ async function openDossier(targetId) {
     <div class="dossier-header">
       <div style="display:flex;justify-content:space-between;align-items:center">
         <span class="d-id">${escapeHtml(d.label || d.target_id)}</span>
-        <span class="d-state ${escapeHtml(live.state || "lost")}">${escapeHtml((live.state || "?").toUpperCase())}</span>
+        <span class="d-state ${escapeHtml(live.state || "lost")}" id="d-state">${escapeHtml((live.state || "?").toUpperCase())}</span>
       </div>
-      <div class="d-sub">${d.target_id} · belief ${live.belief ?? 0} ·
+      <div class="d-sub" id="d-sub">${d.target_id} · belief ${live.belief ?? 0} ·
         profile v${live.profile_version ?? 0} · gallery ${d.gallery_size} crops
         ${d.plate ? " · plate " + escapeHtml(d.plate) : ""}</div>
     </div>
@@ -1859,9 +1922,7 @@ function connect() {
     const msg = JSON.parse(raw.data);
     if (msg.type === "snapshot") {
       latestSnapshot = msg.targets || {};
-      renderTargetsOnMap(latestSnapshot);
-      renderTargetList(latestSnapshot);
-      if (openDossierId && latestSnapshot[openDossierId]) openDossier(openDossierId);
+      scheduleSnapshotRender();
     } else if (msg.type === "contact") {
       flashContact(msg);
     } else if (msg.type === "hop") {
