@@ -32,6 +32,15 @@ matplotlib==3.11.0
 # somewhere unusual. cargen provides single-photo 3DGS reconstruction + gated
 # fusion; see car3d/.
 
+# Feature matching for multi-view 3D fusion. Optional: car3d/profile_model.py
+# falls back to cargen's ORB matcher when this is absent, and everything still
+# runs. It is listed because the difference is not marginal — matching two
+# masked crops of the same car ACROSS two cameras, ORB finds 1 match and
+# LightGlue finds 208, and below ~6 a second viewpoint cannot register at all.
+# With ORB alone a reconstruction is permanently stuck at one viewpoint.
+# Not on PyPI, hence the VCS URL.
+lightglue @ git+https://github.com/cvg/LightGlue.git
+
 # Testing
 pytest==8.3.4
 httpx==0.28.1

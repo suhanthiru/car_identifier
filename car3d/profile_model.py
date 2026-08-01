@@ -95,8 +95,109 @@ def build_pipeline(prior_points: int | None = None):
     if prior_points is None:
         prior_points = (STUB_PRIOR_POINTS if isinstance(prior, StubPriorGenerator)
                         else REAL_PRIOR_POINTS)
+
+    matcher = _build_matcher()
     return Pipeline(segmenter=segmenter, prior_generator=prior,
+                    matcher=matcher,
+                    registrar=_build_registrar(matcher),
+                    fusion_config=_fusion_config(),
                     prior_points=prior_points)
+
+
+def _build_matcher():
+    """LightGlue when it is installed, ORB otherwise.
+
+    Not a preference — a measured difference. Matching two masked crops of the
+    same car, ORB against LightGlue:
+
+        same camera, consecutive frames    8  vs  688
+        across two cameras (wide baseline) 1  vs  208
+
+    cargen's own ORB docstring says as much: wide-baseline matching "is where
+    ORB gets brittle on cars — glossy, textureless panels and bilateral
+    symmetry — so that path should prefer LightGlue". The cross-camera figure
+    is the one that matters: at 1 match a second viewpoint can never register,
+    so every reconstruction was permanently stuck at whatever its first frame
+    saw.
+
+    ORB stays the fallback rather than a hard requirement; LightGlue pulls in
+    torch weights that a minimal checkout may not want.
+    """
+    from cargen import backends
+
+    try:
+        import lightglue  # noqa: F401
+    except ImportError:
+        return backends.build_matcher("orb")
+    try:
+        return backends.build_matcher("lightglue")
+    except Exception as exc:            # noqa: BLE001 — weights, GPU, anything
+        _report_fallback_once(
+            "feature matcher", exc,
+            "ORB matches ~1 point across a camera pair, so extra views of a "
+            "target will not register and its model stays at one viewpoint.")
+        return backends.build_matcher("orb")
+
+
+# How far a match may sit from a stored landmark and still be lifted to its 3D
+# point. cargen defaults to 6px, which was tuned for frames far smaller than a
+# 1835x1238 CityFlow crop; at that size it yielded ~100 correspondences where
+# 12px yields ~224, with reprojection error UNCHANGED at ~2px. Past ~18px the
+# lift starts picking the wrong landmark and PnP fails outright, so this is
+# nearer the floor of the useful band than the ceiling.
+LANDMARK_RADIUS_PX = 12.0
+
+# Registration confidence a view must reach to be fused.
+#
+# cargen defaults to 0.35 and nothing on this data ever reaches it: measured
+# confidences run 0.16-0.25 even for poses whose reprojection error is ~2px on
+# a 4px threshold — i.e. poses that are demonstrably good. The formula is the
+# reason. It scores inliers/total_matches, where total_matches counts every
+# match the matcher produced, so LightGlue's 688 matches drive that term to
+# 0.02 and a BETTER matcher scores WORSE.
+#
+# This was not lowered on the argument above alone. Both settings were built
+# and rendered: at 0.35 exactly one view fuses (37.1% observed); lower gates
+# fuse five or six, reaching ~47%, with the silhouette, wheels and glazing
+# intact from all eight orbit angles and no ghosted geometry.
+#
+# The VALUE is chosen for stability, not for the best single run. Measured
+# confidences on this data cluster in 0.16-0.25, and registration has positive
+# feedback — each accepted view enlarges the landmark store and makes the next
+# easier — so a gate placed INSIDE that cluster is bistable: 0.23 produced 5 of
+# 6 views (46.5%) on one run and 2 of 6 (38.3%) on the next, from nothing but
+# GPU nondeterminism tipping the first borderline frame. A reconstruction whose
+# quality swings on a coin flip is worse than a slightly noisier one that does
+# not, so this sits just below the cluster.
+MIN_REGISTRATION_CONFIDENCE = 0.18
+
+
+def _build_registrar(matcher):
+    from cargen.pose_estimation.registration import PnPRegistrar
+
+    return PnPRegistrar(matcher, neighbor_radius_px=LANDMARK_RADIUS_PX)
+
+
+def _fusion_config():
+    import dataclasses
+
+    from cargen.fusion_engine.engine import FusionConfig
+
+    return dataclasses.replace(
+        FusionConfig(),
+        min_registration_confidence=MIN_REGISTRATION_CONFIDENCE,
+        # Traffic cameras look at a car from below the roofline, so the upper
+        # surfaces are the least observed and the noisiest — they rendered as
+        # black speckle floating above the roof. Pruning faint splats harder
+        # and shortening the reach a new splat may be spawned from existing
+        # geometry (cargen calls that "the guard against inventing depth in
+        # open space") clears most of it. Measured on the same six views:
+        # 0.05/8 -> 46.7% observed and visible speckle; 0.12/5 -> 46.1% and
+        # visibly cleaner; 0.20/4 over-prunes and costs two whole views,
+        # dropping to 43.7%. Half a point of coverage for the noise is worth it
+        # — the noise reads as reconstruction failure to anyone looking.
+        prune_opacity=0.12,
+        densify_reach=5)
 
 
 # Historical private name; the server builds one shared pipeline via the
