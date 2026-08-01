@@ -45,21 +45,6 @@
   <span class="ss-spacer"></span>
   <span class="ss-group" id="ss-live"></span>
 </div>
-<!-- The answer to the strip's "why?", in the page rather than in a tooltip.
-     This is the project's central disclosure: that on this footage, with the
-     default backbone, proposing no cross-camera match is the MEASURED and
-     expected outcome rather than a failure. Hiding it behind hover meant the
-     console posed the question and withheld the answer. -->
-<div id="ss-why-body" class="hidden">
-  <p><b>Measured, not guessed.</b> The default OSNet backbone scores about
-  <b>0.52 fair AUC</b> across these cameras — near chance, where 0.5 is a coin
-  flip — so it rarely clears an alerting threshold on real footage.</p>
-  <p><code>RESULTS.md</code> records that the live console proposed
-  <b>no cross-camera match at all</b> on this data. Zero reviews here is the
-  documented expected outcome, not a fault: the system is declining to assert
-  identities it cannot support. The FastReID backbone, fine-tuned on VeRi-776,
-  retrieves far better — see the README for how to switch to it.</p>
-</div>
 
 <div id="pipeline-strip" class="hidden"></div>
 

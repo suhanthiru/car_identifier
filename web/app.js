@@ -468,33 +468,17 @@ function renderScaleStrip(s) {
          "ground truth: the same vehicle appearing at a new camera. A fact "
          + "about the footage, not a match this system proposed.") +
     cell("reviews", c.reviews_raised, "sent to a human rather than asserted") +
-    cell("refusals", c.refusals, "narrowed to a set and declined to name an individual") +
-    // Disclose the base rate. RESULTS.md records that the live console never
-    // proposed a single cross-camera match on real data with the default
-    // backbone — a measured, expected outcome — and nothing in the running
-    // interface said so. Meanwhile the whole visual language (live map, review
-    // queue, 3D dossier) implies matches are what normally happens. Leaving
-    // that gap to the changelog is overclaiming by omission, which is the one
-    // thing this project is built not to do.
-    // Clickable, not hover-only. The answer lived entirely in a `title`
-    // attribute, so the console asked "why?" on screen and kept the answer
-    // where a mouse had to find it — and touch devices have no hover at all.
-    // A first-time reader reported it as a rhetorical question the developers
-    // had declined to answer, which is the opposite of the intent.
-    `<button type="button" class="ss-note" id="ss-why"`
-    + ` aria-expanded="false">zero reviews is expected here — why?</button>`;
-  const why = document.getElementById("ss-why");
-  if (why && !why.dataset.wired) {
-    why.dataset.wired = "1";
-    why.onclick = () => {
-      const box = document.getElementById("ss-why-body");
-      const open = box.classList.toggle("hidden");
-      why.setAttribute("aria-expanded", String(!open));
-      why.textContent = open
-        ? "zero reviews is expected here — why?"
-        : "zero reviews is expected here — hide";
-    };
-  }
+    cell("refusals", c.refusals,
+         "narrowed to a set and declined to name an individual");
+  // The "zero reviews is expected here — why?" disclosure that used to sit
+  // here has been removed because it had gone stale and was asserting
+  // something no longer true: it said the console proposes no cross-camera
+  // match at all, which was measured BEFORE space-time evidence was wired in.
+  // With that enabled RESULTS.md records 58.8% recall on genuine passages, and
+  // a 20-minute soak of this build raised and resolved 11 reviews. A panel
+  // explaining away an empty queue is worse than useless when the queue is not
+  // empty. The counters above state what actually happened this run, which is
+  // the honest version of the same disclosure.
 }
 
 async function initRestart() {
