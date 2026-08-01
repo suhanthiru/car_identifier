@@ -631,6 +631,55 @@ def create_app(
                 state.flag_embedder = ReidEmbedder()
             return state.flag_embedder
 
+    def _seed_colour_from_photo(profile, png_bytes: bytes):
+        """The cheap half of seeding: the pixel colour heuristic, ~0ms.
+
+        Split out so flagging returns immediately. The expensive half — one
+        ReID embedding per reference crop — runs on a worker and is merged in
+        by _seed_gallery_later.
+        """
+        import cv2
+
+        from perception.attributes import estimate_color
+
+        crop = cv2.imdecode(np.frombuffer(png_bytes, np.uint8), cv2.IMREAD_COLOR)
+        if crop is None or crop.size == 0:
+            raise HTTPException(422, "reference_crop_b64 is not a decodable image")
+        class_attrs = dict(profile.class_attrs)
+        class_attrs.setdefault("color", estimate_color(crop))
+        return dataclasses.replace(profile, class_attrs=class_attrs)
+
+    def _seed_gallery_later(target_id: str, pngs: list[bytes]) -> None:
+        """Embed the reference crops and attach them to an existing target.
+
+        Runs on the shared worker. Until it lands the target has no appearance
+        gallery, so the cascade cannot use ReID for it — which is exactly the
+        state a label-only flag is in, and it is honest: the console shows
+        `gallery N crops` in the dossier and that number simply starts at 0.
+        """
+        import cv2
+
+        crops = []
+        for raw in pngs:
+            img = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
+            if img is not None and img.size:
+                crops.append(img)
+        if not crops:
+            return
+        try:
+            embedder = _flag_embedder()
+            gallery = tuple(embedder.embed(c) for c in crops)
+        except Exception as exc:      # noqa: BLE001 — never sink the target
+            print(f"flag: could not seed the appearance gallery for "
+                  f"{target_id}: {type(exc).__name__}: {exc}")
+            return
+        with state.tracker_lock:
+            tracked = state.tracker.targets().get(target_id)
+            if tracked is None:       # deleted while we were embedding
+                return
+            state.tracker.replace_profile(
+                target_id, dataclasses.replace(tracked.profile, gallery=gallery))
+
     def _seed_profile_from_photo(profile, png_bytes: bytes,
                                  extra_pngs: list[bytes] = ()):
         """Honest evidence from the operator's own reference photos: the
@@ -681,6 +730,7 @@ def create_app(
                 req.class_attrs, req.instance_attrs)
             reference_crop = ""
             ref_names: list[str] = []
+            gallery_pngs: list[bytes] = []
             if req.reference_crop_b64:
                 try:
                     png = base64.b64decode(req.reference_crop_b64, validate=True)
@@ -689,7 +739,18 @@ def create_app(
                 except binascii.Error as exc:
                     raise HTTPException(
                         422, "reference crop is not valid base64") from exc
-                profile = _seed_profile_from_photo(profile, png, extras)
+                # Colour only — the appearance gallery is seeded afterwards.
+                #
+                # Embedding three reference crops costs 113ms measured alone,
+                # but 1.3-2.6s inside a running server, because the click's GPU
+                # work queues behind five ingest threads and the reconstruction
+                # worker. That wait was the whole of the delay between clicking
+                # a car and seeing it appear. The operator's click is
+                # interactive and ingestion is batch, so the click should not
+                # be the thing that waits. The target exists immediately with
+                # its colour and plate; the gallery lands a moment later and
+                # the console is told again.
+                profile = _seed_colour_from_photo(profile, png)
                 reference_crop = f"{target_id}-ref.png"
                 (state.crops_dir / reference_crop).write_bytes(png)
                 # Keep the rest of the passage too. They are further views of
@@ -705,6 +766,13 @@ def create_app(
                     name = f"{target_id}-ref{i + 1}.png"
                     (state.crops_dir / name).write_bytes(extra)
                     ref_names.append(name)
+                # NOT deduplicated, unlike ref_names above. The dedupe exists
+                # to stop SF3D spending ~21s fusing a view it already has; the
+                # appearance gallery has the opposite interest — each crop is
+                # another embedding for the ReID tiebreaker to match against,
+                # and a repeat costs 30ms. Removing them here silently shrank
+                # the gallery from 3 vectors to 1.
+                gallery_pngs = [png] + list(extras)
             with state.tracker_lock:
                 state.tracker.flag_target(profile)
             with Session(engine) as session:
@@ -720,9 +788,22 @@ def create_app(
                               "photo_seeded": bool(req.reference_crop_b64)},
                              state.sim_now)
                 session.commit()
-            return ref_names
+            return ref_names, gallery_pngs
 
-        ref_names = await asyncio.to_thread(_build_and_store)
+        ref_names, gallery_pngs = await asyncio.to_thread(_build_and_store)
+
+        # The appearance gallery, off the click's critical path. Broadcasts a
+        # second time when it lands so the dossier's "gallery N crops" fills in
+        # without the operator refreshing anything.
+        if gallery_pngs:
+            async def _seed_then_tell() -> None:
+                await asyncio.to_thread(_seed_gallery_later, target_id,
+                                        gallery_pngs)
+                await state.manager.broadcast({
+                    "type": "snapshot", "timestamp_s": state.sim_now,
+                    "targets": state.tracker.snapshot(state.sim_now)})
+
+            asyncio.create_task(_seed_then_tell())
         # Start reconstructing from the operator's own reference photos.
         #
         # Fusion used to be reachable ONLY from a profile_update event -- the

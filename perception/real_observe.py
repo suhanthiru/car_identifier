@@ -78,18 +78,21 @@ class RealPerceptor:
         start/end. Reuses the one shared VideoFrameSource capture handle."""
         source = self._video_source(camera_id)
         half = CLIP_FRAMES // 2
-        frames: list[np.ndarray] = []
+        wanted = []
         for i in range(CLIP_FRAMES):
             f = center_frame + (i - half) * CLIP_FRAME_STEP
             if f < 0:
                 continue
             bbox = bbox_for(gt_path, f, vehicle_id)
-            if bbox is None:
-                continue
-            crop = source.crop(f, bbox)
-            if crop is not None and crop.size:
-                frames.append(crop)
-        return tuple(frames)
+            if bbox is not None:
+                wanted.append((f, bbox))
+        # One decoder pass for the whole clip instead of one seek per frame.
+        # These frames span ~30 frames around the midpoint, and a seek costs
+        # 58ms against 7.3ms for a sequential read — six seeks were 350ms of
+        # the 523ms a sighting spent in perception, which is what put ingestion
+        # behind the replay clock.
+        got = source.crops_at(wanted)
+        return tuple(got[f] for f, _ in wanted if f in got)
 
     @staticmethod
     def _nearest_annotated_frame(

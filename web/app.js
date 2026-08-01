@@ -1103,10 +1103,7 @@ function openCameraView(cameraId) {
   const img = document.getElementById("cv-frame");
   document.getElementById("cv-title").textContent = cameraId;
   document.getElementById("cv-sub").textContent = "live view";
-  document.getElementById("cv-note").textContent =
-    "Real footage at this camera, following the replay clock. No boxes drawn: "
-    + "the dataset's ground truth would mark every vehicle perfectly and say "
-    + "nothing about what the system concluded.";
+  document.getElementById("cv-note").textContent = "";
   box.classList.remove("hidden");
   const note = document.getElementById("cv-note");
   const baseNote = note.textContent;

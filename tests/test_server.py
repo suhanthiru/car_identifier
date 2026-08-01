@@ -293,6 +293,25 @@ def photo_app(tmp_path):
     return app
 
 
+def gallery_size_when_seeded(client, target_id, expected, timeout_s=20.0):
+    """Wait for the background appearance seeding to land, then report it.
+
+    The gallery is embedded off the request thread now. Measured alone that
+    work is ~113ms, but inside a running server it took 1.3-2.6s because the
+    click's GPU work queued behind five ingest threads and the reconstruction
+    worker — and that wait WAS the delay between clicking a car and seeing it
+    appear. The colour and plate are set synchronously; the gallery follows.
+    """
+    import time as _time
+
+    deadline = _time.monotonic() + timeout_s
+    while True:
+        got = client.get(f"/api/targets/{target_id}").json()["gallery_size"]
+        if got >= expected or _time.monotonic() > deadline:
+            return got
+        _time.sleep(0.05)
+
+
 def test_flag_with_reference_photo_seeds_profile(tmp_path):
     app = photo_app(tmp_path)
     with TestClient(app) as c:
@@ -302,18 +321,18 @@ def test_flag_with_reference_photo_seeds_profile(tmp_path):
         assert resp.status_code == 201
         tid = resp.json()["target_id"]
         dossier = c.get(f"/api/targets/{tid}").json()
-        # Real derived evidence, not wildcards: pixel color + one gallery vec.
+        # The colour heuristic is cheap and lands with the request itself.
         assert dossier["class_attrs"] == {"color": "white"}
-        assert dossier["gallery_size"] == 1
         assert dossier["reference_crop"] == f"{tid}-ref.png"
+        # The appearance embedding follows on a worker.
+        assert gallery_size_when_seeded(c, tid, 1) == 1
         # Extra passage crops each seed one more gallery embedding.
         resp2 = c.post("/api/targets", json={
             "label": "clicked car 2",
             "reference_crop_b64": base64.b64encode(white_png()).decode(),
             "reference_gallery_b64": [
                 base64.b64encode(white_png()).decode() for _ in range(2)]})
-        d2 = c.get(f"/api/targets/{resp2.json()['target_id']}").json()
-        assert d2["gallery_size"] == 3
+        assert gallery_size_when_seeded(c, resp2.json()["target_id"], 3) == 3
         got = c.get(f"/api/crops/{tid}-ref.png")
         assert got.status_code == 200 and got.content == white_png()
 

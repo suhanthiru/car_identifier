@@ -60,23 +60,51 @@ def vehicle_frame_spans(gt_path: Path) -> dict[int, tuple[int, int]]:
     return {vid: (first[vid], last[vid]) for vid in first}
 
 
-def bbox_for(gt_path: Path, frame: int, vehicle_id: int) -> tuple[int, int, int, int] | None:
-    """(left, top, width, height) for one vehicle at one frame, or None."""
+_BOX_CACHE: dict[tuple[str, float, int], dict[tuple[int, int], tuple[int, int, int, int]]] = {}
+_BOX_CACHE_LOCK = threading.Lock()
+
+
+def _boxes(gt_path: Path) -> dict[tuple[int, int], tuple[int, int, int, int]]:
+    """(frame, vehicle_id) -> bbox for one camera, parsed once and kept.
+
+    bbox_for used to read and split the WHOLE file on every call — 6,324 lines
+    and 3.4ms for S01's c002 — and one sighting asks for seven boxes, or up to
+    67 when `_nearest_annotated_frame` walks an occlusion hole. Keyed on
+    (path, mtime, size) so an edited or swapped dataset is re-read rather than
+    silently served from a stale parse.
+    """
+    try:
+        st = gt_path.stat()
+        key = (str(gt_path), st.st_mtime, st.st_size)
+    except OSError:
+        return {}
+    with _BOX_CACHE_LOCK:
+        hit = _BOX_CACHE.get(key)
+    if hit is not None:
+        return hit
+    boxes: dict[tuple[int, int], tuple[int, int, int, int]] = {}
     for line in gt_path.read_text().splitlines():
         parts = line.replace(";", ",").split(",")
         if len(parts) < 6:
             continue
         try:
             f, vid = int(parts[0]), int(parts[1])
+            boxes[(f, vid)] = tuple(          # type: ignore[assignment]
+                int(round(float(x))) for x in parts[2:6])
         except ValueError:
             continue
-        if f != frame or vid != vehicle_id:
-            continue
-        try:
-            return tuple(int(round(float(x))) for x in parts[2:6])  # type: ignore[return-value]
-        except ValueError:
-            return None
-    return None
+    with _BOX_CACHE_LOCK:
+        # One camera's boxes are a few hundred KB; five cameras is nothing, but
+        # scenario switching would otherwise accumulate every camera ever seen.
+        if len(_BOX_CACHE) > 64:
+            _BOX_CACHE.clear()
+        _BOX_CACHE[key] = boxes
+    return boxes
+
+
+def bbox_for(gt_path: Path, frame: int, vehicle_id: int) -> tuple[int, int, int, int] | None:
+    """(left, top, width, height) for one vehicle at one frame, or None."""
+    return _boxes(gt_path).get((frame, vehicle_id))
 
 
 class VideoFrameSource:
@@ -222,6 +250,65 @@ class VideoFrameSource:
         left, top = max(0, left), max(0, top)
         crop = img[top:top + h, left:left + w]
         return crop if crop.size else None
+
+    def crops_at(
+        self, wanted: list[tuple[int, tuple[int, int, int, int]]],
+    ) -> dict[int, np.ndarray]:
+        """Crop several frames in ONE forward pass. {frame: crop}.
+
+        `crop()` seeks per call, and a sighting needs seven frames — the
+        passage midpoint plus six clip frames spanning about 30 frames either
+        side of it. Measured on S01 c002: a seek costs 58ms and a sequential
+        read 7.3ms, so seven seeks are 408ms while one seek followed by a read
+        through the span is 277ms. That 468ms of clip extraction was 90% of
+        the 523ms each sighting spent in perception, which is what put
+        ingestion behind the replay clock.
+
+        Frames are decoded in ascending order regardless of the order asked
+        for, and anything outside the container is simply absent from the
+        result rather than an error.
+        """
+        import cv2
+
+        if not wanted:
+            return {}
+        out: dict[int, np.ndarray] = {}
+        with self._lock:
+            n = self.frame_count()
+            todo = sorted((f, bb) for f, bb in wanted if f >= 0 and (not n or f < n))
+            if not todo:
+                return out
+            cap = self._capture()
+            first = todo[0][0]
+            # Reuse the decoder's position only when there are PIXELS behind
+            # it. `crop()` advances _pos and deliberately drops _last, so a
+            # position alone is not enough: without the _last check the loop
+            # below would not run for the first frame and would hand back the
+            # None that crop() left, silently returning a sighting with no clip
+            # at all.
+            if not (self._pos is not None and self._last is not None
+                    and 0 <= first - self._pos <= self.SEEK_AHEAD_MAX):
+                cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, first))
+                self._pos = first - 1
+                self._last = None
+            for frame, bbox in todo:
+                while self._pos < frame:
+                    ok, img = cap.read()
+                    if not ok or img is None:
+                        self._pos = None
+                        self._last = None
+                        return out
+                    self._pos += 1
+                    self._last = img
+                img = self._last
+                if img is None:
+                    continue
+                left, top, w, h = bbox
+                left, top = max(0, left), max(0, top)
+                piece = img[top:top + h, left:left + w]
+                if piece.size:
+                    out[frame] = piece
+        return out
 
     def close(self) -> None:
         # Under the lock: this is the release that crashed the process when it
