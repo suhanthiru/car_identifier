@@ -127,3 +127,50 @@ def test_report_save_load_roundtrip(pairs, tmp_path):
 def test_fit_rejects_tiny_datasets(pairs):
     with pytest.raises(ValueError):
         fit(pairs[:3])
+
+
+def test_split_by_identity_shares_no_vehicle_between_halves():
+    """The fit half and the scored half must not share a vehicle.
+
+    A pair-level split is not enough. Two crops of one car carry the same
+    paint, the same camera white balance and the same plate, so a fit that saw
+    one of them has effectively seen the identity it is later scored on, and
+    the "held-out" number stays optimistic. Splitting on the vehicle is the
+    honest version.
+    """
+    from calibration.isotonic import split_by_identity
+
+    class P:
+        def __init__(self, a, b):
+            self.a, self.b = a, b
+
+    pairs = [P(a, b) for a in range(12) for b in range(12) if a <= b]
+    fit_pairs, eval_pairs = split_by_identity(
+        pairs, lambda p: (p.a, p.b), holdout_frac=0.3, seed=3)
+    assert fit_pairs and eval_pairs, "split produced an empty half"
+    fit_ids = {v for p in fit_pairs for v in (p.a, p.b)}
+    eval_ids = {v for p in eval_pairs for v in (p.a, p.b)}
+    assert not (fit_ids & eval_ids), (
+        f"vehicles in both halves: {sorted(fit_ids & eval_ids)}")
+
+
+def test_report_records_whether_its_numbers_are_held_out(pairs):
+    """A calibration artifact must say whether it was scored out of sample.
+
+    The threshold, the PR sweep and the hard-negative FPR used to be computed
+    on the very pairs the isotonic regression was fitted to. Isotonic
+    regression minimises error against those labels by construction, so an
+    in-sample ECE near zero is a property of the method rather than evidence
+    the mapping generalises. The flag exists so that can never again be
+    reported as a generalisation result by accident.
+    """
+    from calibration.isotonic import build_report
+
+    in_sample = build_report(pairs)
+    assert in_sample.held_out is False
+
+    cut = len(pairs) // 2
+    split = build_report(pairs[:cut], eval_pairs=pairs[cut:])
+    assert split.held_out is True
+    assert split.n_fit_pairs == cut
+    assert split.n_eval_pairs == len(pairs) - cut

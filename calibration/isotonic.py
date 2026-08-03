@@ -71,6 +71,16 @@ class CalibrationReport:
     chosen_threshold: float
     target_precision: float
     hard_negative_fpr_at_threshold: float = field(default=0.0)
+    # Whether the sweep, threshold and hard-negative FPR above were measured on
+    # pairs the isotonic fit never saw. False means they are resubstitution
+    # numbers and must be labelled as such wherever they are reported: an
+    # isotonic regression is a flexible monotone fit that minimises error
+    # against the very labels it is scored on, so an in-sample ECE is close to
+    # what the method produces by construction rather than evidence that the
+    # mapping generalises.
+    held_out: bool = False
+    n_fit_pairs: int = 0
+    n_eval_pairs: int = 0
 
 
 def _version_of(pairs: list[SimilarityPair]) -> str:
@@ -152,18 +162,63 @@ def choose_threshold(sweep: tuple[SweepPoint, ...], target_precision: float = 0.
     return max(live, key=lambda p: p.f1).threshold
 
 
+def split_by_identity(
+    pairs: list, vehicle_of, holdout_frac: float = 0.3, seed: int = 11,
+) -> tuple[list, list]:
+    """Split pairs so no VEHICLE appears in both halves.
+
+    A random split over pairs would not be enough. Two different crops of the
+    same car — same paint, same camera white balance, same plate — carry almost
+    the same appearance information, so the fit would have seen the identity it
+    is later scored on and the held-out number would still be optimistic.
+    Splitting on identity is the honest version.
+
+    `vehicle_of(pair)` returns the pair's two vehicle ids. A pair is usable for
+    evaluation only when BOTH of its vehicles fall in the held-out set;
+    cross-split pairs are discarded rather than assigned arbitrarily, which is
+    why the two halves do not sum to the input length.
+    """
+    ids = sorted({v for p in pairs for v in vehicle_of(p)})
+    rng = np.random.default_rng(seed)
+    shuffled = list(ids)
+    rng.shuffle(shuffled)
+    n_hold = max(1, int(round(len(shuffled) * holdout_frac)))
+    held = set(shuffled[:n_hold])
+    fit_pairs, eval_pairs = [], []
+    for p in pairs:
+        a, b = vehicle_of(p)
+        if a in held and b in held:
+            eval_pairs.append(p)
+        elif a not in held and b not in held:
+            fit_pairs.append(p)
+    return fit_pairs, eval_pairs
+
+
 def build_report(pairs: list[SimilarityPair], target_precision: float = 0.95,
-                 note: str = HONESTY_NOTE) -> CalibrationReport:
+                 note: str = HONESTY_NOTE,
+                 eval_pairs: list[SimilarityPair] | None = None,
+                 ) -> CalibrationReport:
+    """Fit on `pairs`; score on `eval_pairs` when they are supplied.
+
+    Without `eval_pairs` every reported number — the sweep, the chosen
+    threshold, the hard-negative FPR, and the ECE a caller computes from the
+    returned model — comes from the same set the isotonic regression was fitted
+    to. That is a resubstitution estimate, and `held_out=False` records it so
+    no caller can present it as a generalisation result by accident.
+    """
     model = fit(pairs, note=note)
-    sweep = pr_sweep(pairs)
+    scored = eval_pairs if eval_pairs else pairs
+    sweep = pr_sweep(scored)
     threshold = choose_threshold(sweep, target_precision)
-    hard = [p for p in pairs if p.hard_negative]
+    hard = [p for p in scored if p.hard_negative]
     hard_fpr = (sum(1 for p in hard if p.similarity >= threshold) / len(hard)
                 if hard else 0.0)
     return CalibrationReport(
         model=model, sweep=sweep, chosen_threshold=threshold,
         target_precision=target_precision,
-        hard_negative_fpr_at_threshold=hard_fpr)
+        hard_negative_fpr_at_threshold=hard_fpr,
+        held_out=bool(eval_pairs),
+        n_fit_pairs=len(pairs), n_eval_pairs=len(scored))
 
 
 # ------------------------------------------------------------- persistence
@@ -181,6 +236,13 @@ def save(report: CalibrationReport, path: str | Path) -> None:
         "chosen_threshold": report.chosen_threshold,
         "target_precision": report.target_precision,
         "hard_negative_fpr_at_threshold": report.hard_negative_fpr_at_threshold,
+        # Persisted so a rehydrated artifact still says whether its threshold
+        # and FPR were measured on data the fit never saw. An in-sample
+        # calibration that loses that label on the way to disk is the same
+        # overclaim, one file later.
+        "held_out": report.held_out,
+        "n_fit_pairs": report.n_fit_pairs,
+        "n_eval_pairs": report.n_eval_pairs,
         # n_predicted is carried so a reader can tell a real operating point
         # from one whose 1.0 precision is the 0/0 placeholder. Dropping it
         # would let a rehydrated sweep look uniformly degenerate — or worse,

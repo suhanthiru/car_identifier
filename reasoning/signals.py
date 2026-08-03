@@ -12,6 +12,8 @@ interpretation so the two cannot drift.
 """
 from __future__ import annotations
 
+import math
+
 from dataclasses import dataclass, replace
 
 from perception.plates import CONFUSIONS
@@ -119,6 +121,12 @@ def _transit_signals(obs: Observation, profile: TargetProfile, graph: RoadGraph)
         out["transit_veto"] = True
         return out
     out["transit_fastest_s"] = fastest
+    # Same NaN guard as plausibility.check_transit — these two derivations
+    # are kept in lockstep by tests/test_signals.py's parity test, and a
+    # NaN that vetoes in one but not the other would break that contract
+    # as well as the veto itself.
+    if not math.isfinite(dt):
+        return {"transit_veto": True}
     if dt < 0 or dt < fastest:
         out["transit_veto"] = True
         return out
@@ -133,6 +141,13 @@ def _attribute_signals(obs: Observation, profile: TargetProfile) -> dict:
     out: dict = {}
     if want.get("body_type") and got.get("body_type") and want["body_type"] != got["body_type"]:
         out["body_veto"] = True
+    # Make/model contradict as hard as body type — see the matching comment in
+    # plausibility.check_attributes. Kept on `body_veto` rather than a new
+    # field so `any_veto` and the counterfactuals pick it up unchanged, and so
+    # the two derivations stay in parity (tests/test_signals.py).
+    for _k in ("make", "model"):
+        if want.get(_k) and got.get(_k) and want[_k] != got[_k]:
+            out["body_veto"] = True
     matches = [k for k in ("make", "model", "color")
                if want.get(k) and got.get(k) and want[k] == got[k]]
     raw_mismatches = [k for k in ("make", "model", "color")

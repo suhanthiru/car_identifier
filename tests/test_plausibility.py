@@ -187,3 +187,55 @@ def test_run_all_checks_orders_by_check(graph):
     checks = [f.check for f in facts]
     assert checks == sorted(checks, key=["plate", "transit", "attributes",
                                          "corroboration"].index)
+
+
+def test_cloned_plate_on_a_different_make_is_an_anomaly_not_a_confirmation():
+    """A plate match must not confirm a car the attributes contradict.
+
+    W_PLATE_EXACT (0.90) alone clears CONFIRM_THRESHOLD (0.85), and only
+    body_type used to veto — so an exact plate on a Honda Civic auto-CONFIRMED
+    against a Toyota Camry target (same body_type, nothing objected), merged
+    that vehicle's evidence into the target's profile, and queued nothing for
+    review. A cloned plate is the most likely way this system ever meets the
+    wrong car; it was the one case the attribute check waved through.
+
+    Vetoing routes it correctly rather than merely blocking it: a veto WITH an
+    exact plate is what the cascade already calls an anomaly — the
+    plate-clone / clock-skew case a human is supposed to see.
+    """
+    facts = check_attributes(
+        make_obs(class_attrs={"make": "Honda", "model": "Civic",
+                          "body_type": "sedan", "color": "black"}),
+        make_profile(class_attrs={"make": "Toyota", "model": "Camry",
+                              "body_type": "sedan", "color": "silver"}))
+    assert any(f.kind == "veto" for f in facts), \
+        f"make/model contradiction did not veto: {[f.text for f in facts]}"
+
+
+def test_colour_difference_alone_still_only_cautions():
+    """Colour must NOT join the veto list: it is a mean-pixel heuristic whose
+    adjacent bins flip under lighting (CONFUSABLE_COLORS). Make and model come
+    from labels or a classifier; colour does not."""
+    facts = check_attributes(
+        make_obs(class_attrs={"make": "Toyota", "model": "Camry",
+                          "body_type": "sedan", "color": "red"}),
+        make_profile(class_attrs={"make": "Toyota", "model": "Camry",
+                              "body_type": "sedan", "color": "blue"}))
+    assert not any(f.kind == "veto" for f in facts)
+
+
+def test_a_nan_timestamp_vetoes_instead_of_disabling_the_physics_check():
+    """Every transit veto is a `dt < x` test, and every comparison with NaN is
+    False — so a NaN timestamp made `dt < 0` and `dt < fastest` both fail, the
+    check fell through to an info fact, and a plate match then confirmed
+    unopposed. The veto the cascade documents as final, disabled by one bad
+    float. NaN is not exotic: a failed parse or a missing field defaulting
+    through the pipeline produces it. A check that cannot run must not read as
+    a pass.
+    """
+    graph = default_world()
+    prof = make_profile(last_seen=LastSeen("cam-nw", 1000.0, "e0"))
+    for bad in (float("nan"),):
+        facts = check_transit(make_obs(camera_id="cam-s", t=bad), prof, graph)
+        assert any(f.kind == "veto" for f in facts), \
+            f"timestamp {bad} did not veto: {[f.text for f in facts]}"

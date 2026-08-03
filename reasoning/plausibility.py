@@ -1,4 +1,4 @@
-"""Symbolic plausibility layer: four checks, every one explainable.
+"""Symbolic plausibility layer: five checks, every one explainable.
 
 These run before any similarity score is even consulted. A hard veto from
 any check rejects the association no matter how good the appearance match
@@ -12,6 +12,8 @@ is — physics and logic outrank embeddings. Checks:
 Each check returns plain-English Facts; the cascade combines them.
 """
 from __future__ import annotations
+
+import math
 
 from perception.plates import CONFUSIONS
 from perception.types import Observation
@@ -107,6 +109,20 @@ def check_transit(obs: Observation, profile: TargetProfile, graph: RoadGraph) ->
     if last is None:
         return [info("No prior confirmed sighting; transit check not applicable.", "transit")]
     dt = obs.timestamp_s - last.timestamp_s
+    # NaN defeats every comparison below, so it must be refused up front.
+    #
+    # Each veto here is a `dt < x` test, and in IEEE-754 EVERY comparison with
+    # NaN is False — so a NaN timestamp on either side made `dt < 0` and
+    # `dt < fastest` both fail, the function fell through to an `info` fact,
+    # and a plate match then confirmed unopposed. That is the physics veto,
+    # which the cascade documents as final, disabled by a single bad float.
+    # NaN is not exotic here: a failed parse, a 0/0 upstream, or a missing
+    # sensor field defaulting through the pipeline all produce it. An
+    # unusable timestamp means the check cannot be performed, and a check
+    # that cannot be performed must not read as a pass.
+    if not math.isfinite(dt):
+        return [veto("Transit cannot be checked: the sighting or the target's "
+                     "last-seen timestamp is not a finite number.", "transit")]
     if last.camera_id == obs.camera_id:
         if dt < 0:
             return [veto("Sighting predates the last confirmed sighting at the same camera.",
@@ -140,6 +156,29 @@ def check_attributes(obs: Observation, profile: TargetProfile) -> list[Fact]:
         facts.append(veto(
             f"Body type contradiction: target is a {want['body_type']}, "
             f"sighting shows a {got['body_type']}.", "attributes"))
+    # Make and model contradict as hard as body type does.
+    #
+    # Only body_type used to veto, so a plate match alone (W_PLATE_EXACT 0.90,
+    # over CONFIRM_THRESHOLD 0.85) auto-CONFIRMED a Honda Civic against a
+    # Toyota Camry target — same body_type, so nothing objected — silently
+    # merging another vehicle's evidence into a real person's profile with
+    # nothing routed to review. A cloned plate is the single most likely way
+    # this system meets a wrong car, and it was the one case the attribute
+    # check waved through.
+    #
+    # Vetoing here also routes it correctly rather than just blocking it: a
+    # veto WITH an exact plate is what the cascade already calls an anomaly,
+    # which is the plate-clone/clock-skew case it queues for a human.
+    #
+    # Colour is deliberately NOT in this list — it is a pixel heuristic whose
+    # adjacent bins flip under lighting (see CONFUSABLE_COLORS), so a colour
+    # difference stays a caution. Make and model come from labels or a
+    # classifier, not from a mean-pixel guess.
+    for key in ("make", "model"):
+        if want.get(key) and got.get(key) and want[key] != got[key]:
+            facts.append(veto(
+                f"{key.capitalize()} contradiction: target is a {want[key]}, "
+                f"sighting shows a {got[key]}.", "attributes"))
     matches = [k for k in ("make", "model", "color")
                if want.get(k) and got.get(k) and want[k] == got[k]]
     mismatches = [k for k in ("make", "model", "color")

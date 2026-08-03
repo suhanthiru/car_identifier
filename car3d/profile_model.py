@@ -168,7 +168,13 @@ LANDMARK_RADIUS_PX = 12.0
 # 6 views (46.5%) on one run and 2 of 6 (38.3%) on the next, from nothing but
 # GPU nondeterminism tipping the first borderline frame. A reconstruction whose
 # quality swings on a coin flip is worse than a slightly noisier one that does
-# not, so this sits just below the cluster.
+# not.
+#
+# 0.18 is at the LOW END of that 0.16-0.25 cluster, not below it — an
+# earlier version of this comment claimed 'just below the cluster', which
+# its own numbers contradict. Repeated runs at this value fused 6/6 views
+# (46.7%, 46.6%), so in practice it clears the borderline frames that made
+# 0.23 bistable; the residual risk is real and accepted rather than denied.
 MIN_REGISTRATION_CONFIDENCE = 0.18
 
 

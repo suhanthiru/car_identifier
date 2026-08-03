@@ -1,0 +1,36 @@
+MIT License
+
+Copyright (c) 2026 suhanthiru
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+THIS LICENCE COVERS THIS REPOSITORY'S CODE ONLY.
+
+It grants no rights in any dataset. VeRi-776, PKU VehicleID and CityFlow /
+AI City Challenge are obtained separately under their own research-use terms,
+which are more restrictive than this licence — AI City Challenge Track 1 is
+non-commercial, and each requires an accepted request form. No dataset image,
+annotation or derived crop is redistributed here; `data/` is gitignored in
+full. See DATASETS.md for the terms and the request routes.
+
+Model weights are likewise not redistributed. torchreid's OSNet weights are
+downloaded at first use under their own licence, and the FastReID SBS(R50-ibn)
+checkpoint is a manual download under FastReID's licence.

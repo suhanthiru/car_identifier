@@ -1,6 +1,6 @@
 # Eyes Everywhere
 
-A real-time, distributed vehicle-tracking and re-identification research demo whose headline deliverable is **honest, reproducible evaluation on public vehicle-ReID datasets** (VeRi-776, VehicleID, CityFlow). The system around the numbers — identity cascade, symbolic plausibility vetoes, capped-additive corroboration, a live operator console, and a per-target 3D model — exists to showcase and stress-test the method. Current results live in [RESULTS.md](RESULTS.md), regenerated end-to-end by one command.
+A real-time, distributed vehicle-tracking and re-identification research demo whose headline deliverable is **honest, reproducible evaluation on public vehicle-ReID datasets** — measured today on VeRi-776 and CityFlow; VehicleID is wired up and its section reads PENDING until the PKU research-request form clears. The system around the numbers — identity cascade, symbolic plausibility vetoes, capped-additive corroboration, a live operator console, and a per-target 3D model — exists to showcase and stress-test the method. Current results live in [RESULTS.md](RESULTS.md), regenerated end-to-end by one command.
 
 > **Data envelope.** Real data means established public research datasets obtained under their research-use terms, and nothing else — no scraped feeds, no covert footage, no non-consented camera data. Until those datasets are downloaded (they require manual request forms; see [DATASETS.md](DATASETS.md)), every real-data section of RESULTS.md reads **PENDING**: the harness never substitutes synthetic numbers for missing real ones. The always-runnable demo uses a clearly-labeled synthetic world.
 
@@ -138,8 +138,8 @@ the harness never substitutes synthetic numbers for missing real ones.
 ### Everything else
 
 ```
-pytest -m "not slow"                 # 338 tests, pure logic + fixtures, no datasets
-pytest                               # 339, adds the one slow real-weights test
+pytest -m "not slow"                 # pure logic + fixtures, no datasets
+pytest                               # adds the one slow real-weights test
 python -m eval.run                   # regenerates RESULTS.md + figures (needs datasets)
 python start.py --mode synthetic     # force the no-dataset demo
 python start.py --mode cityflow      # force real footage; fails loudly if absent
@@ -252,7 +252,7 @@ and for cargen's real 3D backends, which need CUDA.
 
 ## What the evaluation measures
 
-1. **Retrieval** — Rank-1/5/10, mAP, CMC curves on VeRi-776 and VehicleID with the standard same-camera exclusion protocol.
+1. **Retrieval** — Rank-1/5/10, mAP, CMC curves with the standard same-camera exclusion protocol. Measured on VeRi-776; the VehicleID loader and section exist and stay PENDING until that dataset is obtained.
 2. **Hard negatives mined from real data** — negative pairs are same-color/same-body different-vehicle confusables (bucketed on the dataset's own labels), because those are the pairs that actually break similarity thresholds. RESULTS.md shows a gallery of the hardest ones.
 3. **Calibration** — isotonic similarity→P(same) fitted on the mined real pairs, with a reliability diagram (predicted vs empirical) and ECE to prove it, and alert thresholds derived from a precision/recall sweep. Every calibration artifact is content-versioned and decisions cite the version they used.
 4. **The ablation** — precision/recall of alerting under (a) raw ReID score alone vs (b) the identity cascade with attribute vetoes and look-alike ambiguity refusal, on identical rankings. The attribute channel uses dataset labels (a perfect classifier), so the measured delta is an upper bound and is labeled as such.

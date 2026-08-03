@@ -74,11 +74,16 @@ class FlagTargetRequest(StrictModel):
     # seeds honestly-derived evidence from it: the pixel-color heuristic and
     # one appearance-gallery embedding. Without it a label-only flag has no
     # evidence for the cascade to ever match against.
-    reference_crop_b64: str = ""
+    reference_crop_b64: str = Field(default="", max_length=8_000_000)
     # Further crops of the same reference passage (base64 PNGs) — the pose
     # changes across a passage, so seeding first/mid/last frames lets the
     # capped ReID tiebreaker actually recognize the flagged car later.
-    reference_gallery_b64: list[str] = []
+    # Bounded: each entry costs one ReID embedding AND, when 3D is on, one
+    # ~20-90s reconstruction queued onto a single-worker executor. Unbounded,
+    # a handful of requests could back that queue up for hours and write
+    # gigabytes of reference crops to disk.
+    reference_gallery_b64: Annotated[list[Annotated[str, StringConstraints(
+        max_length=8_000_000)]], Field(max_length=16)] = []
 
 
 class PlateReadIn(StrictModel):
@@ -104,17 +109,16 @@ class SightingReport(StrictModel):
     event_id: Annotated[str, StringConstraints(
         min_length=1, max_length=120, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$")]
     camera_id: str = Field(min_length=1, max_length=40)
-    # Bounded, not merely finite. allow_inf_nan=False rejects Infinity and NaN
-    # but happily accepted 1e308, and `state.sim_now = max(sim_now, ...)` runs
-    # BEFORE the work that then failed -- so one rejected request left the
-    # replay clock at 1e308 permanently, for every client, exactly the outage
-    # the Infinity guard was written to prevent. Range is generous (about 31
-    # years of footage) and still keeps the clock representable.
-    # 30 days of footage seconds. The bound was 1e9 — about the year 2033 in
-    # replay seconds — and `state.sim_now = max(sim_now, timestamp_s)` has no
-    # ceiling of its own, so one ACCEPTED sighting at the legal boundary pinned
-    # the reasoning clock there for the rest of the run. Same outage as the
-    # Infinity case, reached through a value the schema permitted.
+    # 30 days of footage seconds — bounded, not merely finite.
+    #
+    # allow_inf_nan=False rejects Infinity and NaN, and that was not enough
+    # twice over. `state.sim_now = max(sim_now, timestamp_s)` has no ceiling of
+    # its own and runs BEFORE the work that can fail, so first a REJECTED
+    # request carrying 1e308 left the replay clock there permanently for every
+    # client, and then — once the bound was 1e9, about the year 2033 in replay
+    # seconds — an ACCEPTED sighting at the legal boundary did the same thing.
+    # Both are the outage the Infinity guard was written to prevent, reached
+    # through values the schema still permitted.
     timestamp_s: float = Field(ge=0.0, le=2_592_000.0)
     lat: float = Field(ge=-90.0, le=90.0)
     lon: float = Field(ge=-180.0, le=180.0)
@@ -122,18 +126,27 @@ class SightingReport(StrictModel):
     # with numpy INSIDE the async handler rather than in a thread — so one
     # unauthenticated POST carrying 20 million floats (~130 MB of JSON) blocked
     # the event loop for ~20s and delayed every other request, /api/stats
-    # included, by up to 11s. Real embeddings are 512 floats at the very most;
-    # 4096 is generous and still trivially cheap.
+    # included, by up to 11s. Real embeddings top out at 2048 floats
+    # (the FastReID VeRi-776 backbone; OSNet-x0_25 is 512), so 4096 is
+    # generous and still trivially cheap.
     embedding: list[float] = Field(min_length=8, max_length=4096)
     plate: PlateReadIn | None = None
     class_attrs: AttrMap = {}
     class_attrs_source: str = Field(default="heuristic", max_length=40)
     instance_attrs: AttrMap = {}
     detection_source: str = Field(default="sim-fallback", max_length=40)
-    crop_png_b64: str = ""
+    # Bounded like everything else on this model. These were the last two
+    # unbounded fields on an unauthenticated endpoint, and this one decodes
+    # base64 and writes files ON the event loop — so a single request carrying
+    # a few hundred megabytes of clip frames stalls the replay clock, every
+    # camera task and every connected console while it works. A real CityFlow
+    # crop encodes to well under 1 MB; 8 MB is generous.
+    crop_png_b64: str = Field(default="", max_length=8_000_000)
     # Ordered base64 PNG frames of the short sighting clip (oldest first).
     # Empty when clips are disabled; the console loops them in the card.
-    clip_frames_b64: list[str] = []
+    # CLIP_FRAMES is 6, so 16 is headroom rather than a limit anyone meets.
+    clip_frames_b64: Annotated[list[Annotated[str, StringConstraints(
+        max_length=8_000_000)]], Field(max_length=16)] = []
     # Simulator ground truth for the evaluation harness. A real edge node
     # would not send this; the serving path never reads it.
     eval_truth_id: str = Field(default="", max_length=64)

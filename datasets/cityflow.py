@@ -196,7 +196,7 @@ class CityFlowScenario:
 
         # Negative exit->enter gaps are NOT annotation noise: they are real
         # vehicles reaching the next camera before leaving the previous
-        # camera's field of view. In S01 that is 74% of all ground-truth
+        # camera's field of view. In S01 that is 82% of all ground-truth
         # transitions, and dropping them was self-defeating — min_s ended up
         # built from the non-overlapping minority, came out far too high, and
         # then vetoed as "physically impossible" the very hops it had

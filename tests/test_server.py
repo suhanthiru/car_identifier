@@ -657,3 +657,67 @@ def test_profile_edit_is_bounded_like_creation(client):
     assert client.patch(f"/api/targets/{tid}",
                         json={"label": "reasonable"}).status_code == 200
     assert len(client.get("/api/targets").content) < 4000
+
+
+@pytest.mark.parametrize("bad_id", [
+    "..", "../..", "..%2F..", r"..\..", r"..\..\web", "does-not-exist",
+])
+def test_delete_target_cannot_reach_outside_the_model_directory(client, bad_id):
+    """DELETE must 404 an unknown id BEFORE deriving a path from it.
+
+    This route removes the target's 3D model directory, and it built that path
+    by joining the raw id onto targets3d_dir with no existence check and no
+    containment check. The tracker's unflag_target is a pop(id, None) that
+    never raises, so an unknown id reached the filesystem. A path segment
+    cannot contain "/", but ".." needs none:
+
+        DELETE /api/targets/..      -> rmtree(<repo>/data)
+        DELETE /api/targets/../..   -> rmtree(<repo>)
+
+    One unauthenticated request from deleting the repository.
+    """
+    # Both outcomes mean the same thing: the request never reached the
+    # filesystem. A forward-slash ".." is normalised away by any conforming
+    # client before routing, so it lands on a different route and yields 405.
+    # The BACKSLASH form is normalised by nothing, reaches the handler, and is
+    # why the guard has to exist rather than being left to the client. A raw
+    # socket or `curl --path-as-is` skips normalisation for both forms.
+    assert client.delete(f"/api/targets/{bad_id}").status_code in (404, 405)
+
+
+def test_delete_target_still_removes_a_real_one(client):
+    """The guard must not break the actual feature."""
+    tid = client.post("/api/targets", json={"label": "real"}).json()["target_id"]
+    assert client.get(f"/api/targets/{tid}").status_code == 200
+    assert client.delete(f"/api/targets/{tid}").status_code == 204
+    assert client.get(f"/api/targets/{tid}").status_code == 404
+
+
+@pytest.mark.parametrize("field", ["crop_png_b64", "reference_crop_b64"])
+def test_base64_image_fields_are_bounded(client, field):
+    """The last unbounded fields on an unauthenticated endpoint.
+
+    POST /api/sightings decodes base64 and writes files; unbounded, one request
+    carrying hundreds of megabytes of clip frames stalls the replay for every
+    connected client. A real CityFlow crop encodes to well under 1 MB.
+    """
+    huge = "A" * 9_000_000
+    if field == "crop_png_b64":
+        body = sighting(event_id="evt-big")
+        body["crop_png_b64"] = huge
+        assert client.post("/api/sightings", json=body).status_code == 422
+    else:
+        assert client.post("/api/targets", json={
+            "label": "big", "reference_crop_b64": huge}).status_code == 422
+
+
+def test_image_lists_are_bounded(client):
+    """Each gallery entry costs an embedding and, with 3D on, a ~20-90s
+    reconstruction queued on a single worker. An unbounded list is an
+    unbounded queue."""
+    body = sighting(event_id="evt-many")
+    body["clip_frames_b64"] = ["QQ=="] * 64
+    assert client.post("/api/sightings", json=body).status_code == 422
+    assert client.post("/api/targets", json={
+        "label": "many", "reference_crop_b64": "QQ==",
+        "reference_gallery_b64": ["QQ=="] * 64}).status_code == 422

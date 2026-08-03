@@ -188,7 +188,7 @@ def veri_section(quick: bool, embedders: list[str] | None = None) -> str:
 
 def _veri_block(quick: bool, primary: bool = True) -> str:
     from datasets.veri776 import Veri776
-    from calibration.isotonic import build_report, save
+    from calibration.isotonic import build_report, save, split_by_identity
     from eval.ablation import run_ablation
     from eval.embed_dataset import embed_images
     from eval.hard_negatives import hardest_pairs, mine_pairs
@@ -223,14 +223,30 @@ def _veri_block(quick: bool, primary: bool = True) -> str:
     plot_cmc(res.cmc, f"VeRi-776 CMC ({EMBED_ARCH.split()[0]})", f"veri_cmc{sfx}.png")
 
     pairs = mine_pairs(gallery, g_emb)
-    report = build_report(pairs, note=(
+    # Identity-disjoint fit/evaluation split.
+    #
+    # Everything here used to be computed on one undivided set: the isotonic
+    # regression was fitted on `pairs`, then the PR sweep, the chosen
+    # threshold, the hard-negative FPR and the ECE were all measured on those
+    # same pairs. Isotonic regression is a flexible monotone fit that minimises
+    # error against exactly those labels, so an in-sample ECE near zero is what
+    # the method produces by construction — not evidence that the mapping
+    # generalises. Splitting on VEHICLE rather than on pairs matters because
+    # two crops of one car share paint, camera and plate, so a pair-level split
+    # would still leak the identity being scored.
+    fit_pairs, eval_pairs = split_by_identity(
+        pairs, lambda p: (gallery[p.a_index].vehicle_id,
+                          gallery[p.b_index].vehicle_id))
+    report = build_report(fit_pairs, eval_pairs=eval_pairs, note=(
         "Calibrated on VeRi-776 gallery pairs (real vehicle crops): measures "
         "this embedder's confusability on that dataset — it does not "
-        "transfer to other deployments (see eval/generalization notes)."))
+        "transfer to other deployments (see eval/generalization notes). "
+        "Fitted and scored on identity-disjoint halves; the reported "
+        "threshold, sweep, hard-negative FPR and ECE are held-out."))
     save(report, f"calibration/artifacts/veri776{sfx}.json")
     if primary:
         save(report, "calibration/artifacts/veri776.json")
-    rel = compute_reliability(pairs, report.model)
+    rel = compute_reliability(eval_pairs, report.model)
     plot_reliability(rel.bins, rel.ece, f"veri_reliability{sfx}.png")
     plot_pr_sweep(report.sweep, report.chosen_threshold, f"veri_sweep{sfx}.png")
 

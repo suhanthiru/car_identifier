@@ -926,6 +926,21 @@ def create_app(
 
     @app.delete("/api/targets/{target_id}", status_code=204)
     def unflag_target(target_id: str):
+        # 404 an id that names no live target, BEFORE anything derives a
+        # filesystem path from it.
+        #
+        # This route deletes the target's 3D model directory, and it built that
+        # path by joining the raw id onto targets3d_dir with no check of either
+        # kind. `unflag_target` on the tracker is a pop(id, None) that never
+        # raises, so an unknown id sailed through to the filesystem. A path
+        # segment cannot contain "/", but ".." needs none:
+        #     DELETE /api/targets/..      -> rmtree(D:\car_identifier\data)
+        #     DELETE /api/targets/..%5C.. -> rmtree(D:\car_identifier)
+        # i.e. one unauthenticated request away from deleting the repository.
+        # Every sibling target route already does this existence check; this
+        # one — the only one that deletes files — did not.
+        if target_id not in state.tracker.targets():
+            raise HTTPException(404, "unknown target")
         with state.tracker_lock:
             state.tracker.unflag_target(target_id)
         with Session(engine) as session:
@@ -965,7 +980,18 @@ def create_app(
                 job.result(timeout=10)
             except Exception:            # noqa: BLE001 — already reported
                 pass
-        model_dir = Path(state.targets3d_dir) / target_id
+        # Resolve and contain before deleting, the same way _write_crop does
+        # for the crop path. The existence check above is the primary guard;
+        # this is the one that cannot be widened by a future refactor, because
+        # it checks the resolved path rather than the shape of the input.
+        root = Path(state.targets3d_dir).resolve()
+        try:
+            model_dir = (root / target_id).resolve()
+        except (OSError, ValueError):
+            return
+        if root not in model_dir.parents:
+            print(f"car3d: refusing to delete {model_dir} — outside {root}")
+            return
         if model_dir.is_dir():
             shutil.rmtree(model_dir, ignore_errors=True)
             if model_dir.exists():
@@ -1002,26 +1028,38 @@ def create_app(
     async def report_sighting(report: SightingReport):
         obs = _observation_from_report(report)
         state.sim_now = max(state.sim_now, obs.timestamp_s)
-        crop_name = ""
-        if report.crop_png_b64:
-            try:
-                png = base64.b64decode(report.crop_png_b64, validate=True)
-            except binascii.Error as exc:
-                raise HTTPException(422, "crop_png_b64 is not valid base64") from exc
-            crop_name = f"{obs.event_id}.png"
-            _write_crop(crop_name, png)
 
-        # Short looping sighting clip, saved as sibling frames the review card
-        # flips through; reuses the same /api/crops server as the still.
-        clip_count = 0
-        for i, frame_b64 in enumerate(report.clip_frames_b64):
-            try:
-                frame_png = base64.b64decode(frame_b64, validate=True)
-            except binascii.Error as exc:
-                raise HTTPException(
-                    422, "clip_frames_b64 contains invalid base64") from exc
-            _write_crop(f"{obs.event_id}.f{i}.png", frame_png)
-            clip_count += 1
+        def _decode_and_store_crops() -> tuple[str, int]:
+            """base64 decode + disk writes, off the event loop.
+
+            This is the highest-frequency endpoint in the system and it was
+            doing both inline in an `async def` — the exact pattern flag_target
+            was rewritten to avoid, and for the same reason: while it worked,
+            the replay clock, all five camera tasks and every WebSocket client
+            were frozen. Seven PNGs a sighting at several sightings a second is
+            enough to feel even with the fields now bounded.
+            """
+            name = ""
+            if report.crop_png_b64:
+                try:
+                    png = base64.b64decode(report.crop_png_b64, validate=True)
+                except binascii.Error as exc:
+                    raise HTTPException(
+                        422, "crop_png_b64 is not valid base64") from exc
+                name = f"{obs.event_id}.png"
+                _write_crop(name, png)
+            n = 0
+            for i, frame_b64 in enumerate(report.clip_frames_b64):
+                try:
+                    frame_png = base64.b64decode(frame_b64, validate=True)
+                except binascii.Error as exc:
+                    raise HTTPException(
+                        422, "clip_frames_b64 contains invalid base64") from exc
+                _write_crop(f"{obs.event_id}.f{i}.png", frame_png)
+                n += 1
+            return name, n
+
+        crop_name, clip_count = await asyncio.to_thread(_decode_and_store_crops)
 
         with state.tracker_lock:
             events = state.tracker.process_observation(obs)
@@ -1884,6 +1922,13 @@ def create_app(
     def target_model3d_file(target_id: str, name: str):
         from car3d.profile_model import Target3DModel
 
+        # `name` was containment-checked here; `target_id` was not, even though
+        # it is the FIRST component joined onto the root. The trailing
+        # "exports" segment limited the damage — the path always had to end in
+        # a directory of that name — but "constrained by a coincidence of the
+        # layout" is not a control. Every sibling target route checks this.
+        if target_id not in state.tracker.targets():
+            raise HTTPException(404, "unknown target")
         # Same null-byte guard as /api/crops: resolve() raises rather than
         # returning a path, and an unrepresentable name is a 404, not a 500.
         try:
