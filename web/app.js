@@ -1685,22 +1685,34 @@ function showDossierView() {
  * changes visibly at about 1Hz, so most of that work was thrown away before
  * anyone saw it, and it competed with the browser's own compositing.
  *
- * requestAnimationFrame collapses a burst into a single repaint and stops
- * entirely when the tab is not visible, which is the correct behaviour for a
- * view nobody is looking at.
+ * requestAnimationFrame collapses a burst into a single repaint — but it does
+ * NOT fire at all while the tab is hidden, and relying on that was a mistake.
+ * A reviewer driving this console from a non-compositing browser pane flagged
+ * a car, watched POST /api/targets return 201, confirmed the target existed
+ * server-side, and saw the TARGETS panel stay empty and the cascade panel stay
+ * hidden. They reported the headline interaction as silently broken. It was
+ * not broken for anyone with a visible tab, but a UI whose correctness depends
+ * on being looked at is indefensible: it breaks screenshots, automation, and
+ * any operator with the console on a second monitor's background workspace.
+ *
+ * So: whichever of the frame callback or a short timer fires first wins, and
+ * the other becomes a no-op. Bursts still coalesce; a hidden tab still updates.
  */
 let snapshotRenderQueued = false;
 function scheduleSnapshotRender() {
   if (snapshotRenderQueued) return;
   snapshotRenderQueued = true;
-  requestAnimationFrame(() => {
+  const paint = () => {
+    if (!snapshotRenderQueued) return;      // the other trigger got there first
     snapshotRenderQueued = false;
     renderTargetsOnMap(latestSnapshot);
     renderTargetList(latestSnapshot);
     if (openDossierId && latestSnapshot[openDossierId]) {
       refreshOpenDossier(latestSnapshot[openDossierId]);
     }
-  });
+  };
+  requestAnimationFrame(paint);
+  setTimeout(paint, 250);
 }
 
 /* Keep an open dossier current WITHOUT rebuilding it.

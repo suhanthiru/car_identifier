@@ -721,3 +721,44 @@ def test_image_lists_are_bounded(client):
     assert client.post("/api/targets", json={
         "label": "many", "reference_crop_b64": "QQ==",
         "reference_gallery_b64": ["QQ=="] * 64}).status_code == 422
+
+
+def test_reset_clears_targets_and_reviews_not_just_activity(client):
+    """Reset must empty every surface, not only the one that had a test.
+
+    Only /api/cityflow/activity was covered. Reviews are DB-backed, so
+    dropping ReviewRow from reset_runtime's bulk delete would leave the
+    previous run's review cards on screen beside a rewound clock — the exact
+    past-evidence-next-to-present-conclusions confusion reset exists to
+    prevent — and the suite would have stayed green.
+    """
+    client.post("/api/targets", json={"label": "t", "plate": PLATE,
+                                      "class_attrs": dict(CAMRY),
+                                      "instance_attrs": {"accessory": "roof rack"}})
+    body = sighting(event_id="rv-1", plate=None, eval_truth_id="9")
+    body["instance_attrs"] = {"accessory": "roof rack"}
+    client.post("/api/sightings", json=body)
+    assert client.get("/api/targets").json(), "no target to clear"
+
+    # POST /api/reset only RAISES the flag; start.py's supervisor performs the
+    # wipe, and no supervisor runs under TestClient. Call the same function the
+    # supervisor calls, so this tests the clearing itself rather than the flag.
+    client.app.state.reset_runtime()
+    assert client.get("/api/targets").json() == {}
+    assert client.get("/api/reviews").json() == []
+    assert client.get("/api/cityflow/activity").json()["vehicles"] == {}
+
+
+def test_oversized_entry_inside_an_image_list_is_rejected(client):
+    """List LENGTH was bounded; each entry's size was not tested.
+
+    Sixteen entries of eight million characters each is still ~128 MB of
+    base64 through an unauthenticated endpoint, so the per-item bound matters
+    as much as the count.
+    """
+    body = sighting(event_id="evt-fat")
+    body["clip_frames_b64"] = ["A" * 9_000_000]
+    assert client.post("/api/sightings", json=body).status_code == 422
+    assert client.post("/api/targets", json={
+        "label": "fat", "reference_crop_b64": "QQ==",
+        "reference_gallery_b64": ["A" * 9_000_000]}).status_code == 422

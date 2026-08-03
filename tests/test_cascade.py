@@ -191,3 +191,45 @@ def test_partial_plate_read_contributes_less_than_a_full_near_miss(graph):
     near_miss = evaluate(make_obs(plate="ABC-1Z34"), make_profile(), graph)
     assert 0 < mostly_masked.score < mostly_read.score < near_miss.score
     assert mostly_read.deciding_tier == "plate"
+
+
+def test_cloned_plate_on_a_wrong_make_is_rejected_through_the_scoring_layer(graph):
+    """Exercise the SIGNALS path, not just the Facts path.
+
+    check_attributes (display) and _attribute_signals (scoring) are two
+    implementations of the same rule, and evaluate() consumes the second one
+    via MatchSignals.any_veto. A test that only calls check_attributes leaves
+    the live decision path unguarded: setting signals.py's make/model loop to
+    iterate nothing would still render a veto Fact while the cascade
+    auto-CONFIRMED a cloned plate on the wrong car, and the suite would stay
+    green. This asserts the verdict, which is what actually reaches an
+    operator.
+    """
+    target = make_profile(plate="ABC-1234", class_attrs=dict(CAMRY))
+    wrong = dict(CAMRY)
+    wrong["make"], wrong["model"] = "Honda", "Civic"
+    decision = evaluate(
+        make_obs(plate="ABC-1234", plate_conf=0.95, class_attrs=wrong),
+        target, graph)
+    assert decision.verdict == VERDICT_REJECTED
+    # Plate-exact plus a veto is the plate-clone anomaly a human must see.
+    assert decision.anomaly is True
+    assert decision.requires_review is True
+
+
+def test_nan_timestamp_is_rejected_through_the_scoring_layer(graph):
+    """Same split, same risk: _transit_signals is the copy evaluate() uses.
+
+    Every transit veto is a `dt < x` test and every comparison with NaN is
+    False, so without an explicit finite check the physics veto silently
+    switches off and a plate match confirms unopposed. Guarding only
+    plausibility.check_transit would leave that live path untested.
+    """
+    target = make_profile(plate="ABC-1234", class_attrs=dict(CAMRY),
+                          last_seen=LastSeen("cam-nw", 1000.0, "evt-0"))
+    decision = evaluate(
+        make_obs(camera_id="cam-s", t=float("nan"), plate="ABC-1234",
+                 plate_conf=0.95, class_attrs=dict(CAMRY)),
+        target, graph)
+    assert decision.verdict == VERDICT_REJECTED
+    assert decision.requires_review is True

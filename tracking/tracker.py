@@ -234,6 +234,14 @@ class FleetTracker:
             return dict(self._last_verdicts)
 
     def process_observation(self, obs: Observation) -> list[TrackerEvent]:
+        # Mutates _targets/_reviews, so it takes the tracker's own lock too.
+        # The server also wraps this in state.tracker_lock; the RLock makes
+        # that harmless, and holding it here is what stops resolve_review's
+        # _reviews.pop racing a concurrent pending_reviews().
+        with self._lock:
+            return self._process_observation_locked(obs)
+
+    def _process_observation_locked(self, obs: Observation) -> list[TrackerEvent]:
         self._last_verdicts = {}
         if not self._targets:
             return []
@@ -375,6 +383,13 @@ class FleetTracker:
     def resolve_review(
         self, review_id: str, accept: bool, now_s: float
     ) -> list[TrackerEvent]:
+        # _reviews.pop here raced pending_reviews() before the lock covered it.
+        with self._lock:
+            return self._resolve_review_locked(review_id, accept, now_s)
+
+    def _resolve_review_locked(
+        self, review_id: str, accept: bool, now_s: float
+    ) -> list[TrackerEvent]:
         review = self._reviews.pop(review_id, None)
         if review is None:
             raise KeyError(f"unknown review {review_id}")
@@ -430,6 +445,10 @@ class FleetTracker:
 
     def tick(self, now_s: float) -> list[TrackerEvent]:
         """Advance lifecycle clocks; emits state_change events."""
+        with self._lock:
+            return self._tick_locked(now_s)
+
+    def _tick_locked(self, now_s: float) -> list[TrackerEvent]:
         events: list[TrackerEvent] = []
         for target_id, tracked in list(self._targets.items()):
             new_track = on_tick(tracked.track, now_s)
