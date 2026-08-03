@@ -2,6 +2,11 @@
 
 No project knowledge needed. You need ~10 minutes and a browser.
 
+> This walkthrough assumes CityFlow is downloaded (see DATASETS.md). Without
+> it `python start.py` runs the synthetic world instead — the same workflow
+> and the same controls, with simulated vehicles rather than real footage,
+> and the banner says so.
+
 ## What this is
 
 Real traffic-camera footage from a public research dataset (CityFlow), five cameras
@@ -89,7 +94,9 @@ will say so outright.
 ## Known, already-measured limits
 
 - About **half** of real camera-to-camera passages get surfaced. It misses things.
-- Roughly **1 in 150** suggestions involving a same-colour car is wrong.
+- Roughly **1 in 23** suggestions involving a same-colour car is wrong on the
+  default backbone (1 in 38 on FastReID) — the same-colour impostor column
+  in RESULTS.md.
 - Colour is estimated from pixels and gets fooled by lighting; silver/grey/white
   are treated as interchangeable on purpose.
 - Numbers behind all of this are in `RESULTS.md`, including the unflattering ones.

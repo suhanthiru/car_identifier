@@ -86,6 +86,14 @@ def reconstruct_attrs(crops, records, cache_path: Path, limit_px: int = 64):
     crash four hours in should not cost four hours. Keyed by vehicle/camera/
     index so a re-run with a different subsample reuses what it can.
     """
+    # Cache validity across the 2026-08-01 reconstruction changes: checked, and
+    # unaffected. LightGlue, the landmark radius and the registration gate only
+    # apply from the SECOND view onward, and this loop fuses exactly one crop
+    # per model, so registration never runs. prune_opacity and densify_reach do
+    # apply to the bootstrap, so they were measured directly on 30 real S01
+    # crops under both settings: 0.05/8 gave 7/30 usable at median observed
+    # fraction 0.095, and 0.12/5 gave 7/30 at 0.094 — a delta of zero crops.
+    # The cached signatures therefore still describe the current pipeline.
     cached = json.loads(cache_path.read_text()) if cache_path.is_file() else {}
     pipeline = build_pipeline()
     out: dict[int, dict[str, str]] = {}

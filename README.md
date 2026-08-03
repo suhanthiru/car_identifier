@@ -135,6 +135,13 @@ Both datasets require a research-use request form — see [DATASETS.md](DATASETS
 Until they're present, every real-data section of RESULTS.md reads **PENDING**;
 the harness never substitutes synthetic numbers for missing real ones.
 
+### Driving it yourself
+
+[STRESS_TEST.md](STRESS_TEST.md) is a ~10-minute walkthrough of the operator
+console — flag a car, watch the cascade reason about it, try to make it assert
+something it shouldn't. It reads best with CityFlow downloaded, and says what
+changes if you don't have it.
+
 ### Everything else
 
 ```

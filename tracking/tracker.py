@@ -16,6 +16,7 @@ between look-alikes is precisely what this system refuses to automate.
 from __future__ import annotations
 
 import itertools
+import threading
 from dataclasses import dataclass, field, replace
 from typing import Mapping
 
@@ -87,34 +88,51 @@ class FleetTracker:
         # the console can show the reasoning and not just its conclusion.
         self._traces: dict[str, dict] = {}
         self._reviews: dict[str, PendingReview] = {}
+        # The tracker owns its own lock, so a reader cannot forget it.
+        #
+        # Reads (targets/pending_reviews/snapshot/trace) were called unlocked
+        # from ten-plus route handlers while writes elsewhere correctly held
+        # the server's tracker_lock. A DELETE landing mid-iteration of
+        # snapshot()'s `for target_id, t in self._targets.items()` raises
+        # RuntimeError: dictionary changed size during iteration — an
+        # intermittent 500 on GET /api/targets, /api/reviews or
+        # /api/cityflow/activity, triggered by an unrelated concurrent action.
+        # Reentrant because the server still wraps some of these in its own
+        # tracker_lock, and because process_observation calls locked helpers.
+        self._lock = threading.RLock()
         self._review_seq = itertools.count(1)
 
     # ------------------------------------------------------------- targets
 
     def flag_target(self, profile: TargetProfile) -> None:
-        if profile.target_id in self._targets:
-            raise ValueError(f"target {profile.target_id} already flagged")
-        self._targets[profile.target_id] = TrackedTarget(
-            profile=profile,
-            corroboration=CorroborationState(target_id=profile.target_id),
-            track=Track(target_id=profile.target_id),
-        )
+        with self._lock:
+            if profile.target_id in self._targets:
+                raise ValueError(f"target {profile.target_id} already flagged")
+            self._targets[profile.target_id] = TrackedTarget(
+                profile=profile,
+                corroboration=CorroborationState(target_id=profile.target_id),
+                track=Track(target_id=profile.target_id),
+            )
 
     def unflag_target(self, target_id: str) -> None:
-        self._targets.pop(target_id, None)
-        self._reviews = {k: v for k, v in self._reviews.items()
-                        if v.target_id != target_id}
+        with self._lock:
+            self._targets.pop(target_id, None)
+            self._reviews = {k: v for k, v in self._reviews.items()
+                             if v.target_id != target_id}
 
     def targets(self) -> dict[str, TrackedTarget]:
-        return dict(self._targets)
+        with self._lock:
+            return dict(self._targets)
 
     def replace_profile(self, target_id: str, profile: TargetProfile) -> None:
         """Operator-authority profile swap (server records the audit row)."""
-        tracked = self._targets[target_id]
-        self._targets[target_id] = replace(tracked, profile=profile)
+        with self._lock:
+            tracked = self._targets[target_id]
+            self._targets[target_id] = replace(tracked, profile=profile)
 
     def pending_reviews(self) -> tuple[PendingReview, ...]:
-        return tuple(self._reviews.values())
+        with self._lock:
+            return tuple(self._reviews.values())
 
     # -------------------------------------------------------- observations
 
@@ -200,7 +218,8 @@ class FleetTracker:
 
     def trace(self, target_id: str) -> dict:
         """The most recent cascade evaluation against this target, or {}."""
-        return dict(self._traces.get(target_id, {}))
+        with self._lock:
+            return dict(self._traces.get(target_id, {}))
 
     def last_verdicts(self) -> dict[str, int]:
         """What the cascade concluded about the observation just processed.
@@ -211,7 +230,8 @@ class FleetTracker:
         footage. Empty dict when nothing is flagged: with no targets there is
         nothing to compare against and no reasoning to report.
         """
-        return dict(self._last_verdicts)
+        with self._lock:
+            return dict(self._last_verdicts)
 
     def process_observation(self, obs: Observation) -> list[TrackerEvent]:
         self._last_verdicts = {}
@@ -426,7 +446,12 @@ class FleetTracker:
     def snapshot(self, now_s: float) -> dict:
         """Console-ready view of every flagged target."""
         out = {}
-        for target_id, t in self._targets.items():
+        # Snapshot the mapping under the lock before iterating: this loop is
+        # the one a concurrent DELETE turned into
+        # "RuntimeError: dictionary changed size during iteration".
+        with self._lock:
+            items = list(self._targets.items())
+        for target_id, t in items:
             position = None
             if t.smoother is not None:
                 lat, lon = predict(t.smoother, now_s)

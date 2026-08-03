@@ -1,4 +1,6 @@
 """FleetTracker integration tests: association gating, ambiguity, reviews."""
+import time
+
 import numpy as np
 import pytest
 
@@ -146,3 +148,52 @@ def test_unknown_review_raises(graph):
 def test_no_targets_no_events(graph):
     tracker = FleetTracker(graph)
     assert tracker.process_observation(make_obs()) == []
+
+
+def test_reads_survive_concurrent_flag_and_delete():
+    """Reading the tracker while another thread mutates it must not raise.
+
+    snapshot()/targets()/pending_reviews() were called unlocked from ten-plus
+    route handlers while writes held the server's tracker_lock. A DELETE
+    landing mid-iteration of snapshot()'s `for target_id, t in
+    self._targets.items()` raises "dictionary changed size during iteration" —
+    an intermittent 500 on GET /api/targets, /api/reviews or
+    /api/cityflow/activity, caused by an unrelated concurrent action. The lock
+    now lives on the tracker so no caller can forget it.
+    """
+    import threading
+
+    tracker = FleetTracker(default_world())
+    errors: list[BaseException] = []
+    stop = threading.Event()
+
+    def churn():
+        i = 0
+        while not stop.is_set():
+            tid = f"tgt-{i % 50:03d}"
+            try:
+                tracker.flag_target(make_profile(target_id=tid))
+            except ValueError:
+                pass
+            tracker.unflag_target(f"tgt-{(i + 7) % 50:03d}")
+            i += 1
+
+    def read():
+        while not stop.is_set():
+            try:
+                tracker.snapshot(1000.0)
+                tracker.targets()
+                tracker.pending_reviews()
+            except Exception as exc:            # noqa: BLE001 — recorded
+                errors.append(exc)
+                return
+
+    threads = [threading.Thread(target=churn, daemon=True) for _ in range(2)]
+    threads += [threading.Thread(target=read, daemon=True) for _ in range(4)]
+    for t in threads:
+        t.start()
+    time.sleep(1.5)
+    stop.set()
+    for t in threads:
+        t.join(timeout=5)
+    assert not errors, f"concurrent read raised: {errors[:3]}"

@@ -1,0 +1,46 @@
+name: tests
+
+# The suite is the project's main correctness claim, and until now nothing but
+# the author's own diligence ran it. Several bugs fixed in this repo were
+# regressions that a test caught only because someone happened to run it
+# locally; CI is what makes "356 tests pass" a fact about every commit rather
+# than a fact about one machine on one afternoon.
+on:
+  push:
+    branches: [main, "**"]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      # CPU torch on purpose. setup_env.py installs a CUDA build when it sees a
+      # GPU; a hosted runner has none, and the CPU wheel is both correct here
+      # and an order of magnitude smaller to fetch.
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -r requirements.txt
+
+      # No datasets and no cargen on a runner, which is exactly the path the
+      # README promises works: presence-gated loaders skip, conftest pins the
+      # 3D backends to stubs, and the marked slow test needs real weights.
+      - name: Test
+        run: pytest -m "not slow" -q
+
+      # The console is plain ES5-compatible script, not a build artifact — a
+      # syntax error in it would otherwise only surface in a browser.
+      - name: Check console JavaScript parses
+        run: |
+          node --check web/app.js
+          node --check web/inspector.js
+          node --check web/roadmap.js
+          node --check web/pipeline_diagram.js

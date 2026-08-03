@@ -808,8 +808,9 @@ def create_app(
         #
         # Fusion used to be reachable ONLY from a profile_update event -- the
         # moment the cascade confirmed a cross-camera match. On real footage
-        # with the default backbone that essentially never fires (RESULTS.md:
-        # no cross-camera match was proposed at all), so the 3D panel could not
+        # with the default backbone that was rare before space-time evidence
+        # was wired into the cascade (RESULTS.md now records 58.8% recall on
+        # genuine passages; it was 0/284 before), so the 3D panel could not
         # populate on real data no matter how long it ran. The reconstruction
         # is visual, not identity evidence, and a car's own passage crops are
         # enough to build it: no match has to be believed first. Confirmed

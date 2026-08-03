@@ -287,11 +287,24 @@ def _veri_block(quick: bool, primary: bool = True) -> str:
         "",
         "### Calibration on mined real hard negatives",
         "",
-        f"{len(pairs)} pairs ({n_hard} hard negatives = same-color same-body "
-        f"different-vehicle, mined by bucket). Calibration version "
-        f"`isotonic-{report.model.version}`; ECE {rel.ece:.3f}. "
+        f"{len(pairs)} pairs mined ({n_hard} hard negatives = same-color "
+        f"same-body different-vehicle, bucketed), split by VEHICLE into "
+        f"{report.n_fit_pairs} pairs to fit and {report.n_eval_pairs} held out. "
+        f"Calibration version `isotonic-{report.model.version}`; "
+        f"**ECE {rel.ece:.3f}, measured on the held-out half**. "
         f"{_threshold_note(report)} Hard-negative FPR at that threshold: "
         f"{report.hard_negative_fpr_at_threshold:.1%}.",
+        "",
+        "*Every number in this block is out-of-sample.* An earlier version fitted "
+        "the isotonic curve and then measured ECE, the PR sweep, the threshold "
+        "and the hard-negative FPR on that same undivided pair set, which "
+        "reported ECE 0.004 — a figure isotonic regression produces close to by "
+        "construction, since it minimises error against exactly those labels. "
+        "The split is on vehicle rather than on pairs because two crops of one "
+        "car share paint, camera and plate, so a pair-level split would still "
+        "leak the identity being scored. The honest number is roughly thirty "
+        "times worse than the one it replaced, and it is the one that means "
+        "anything.",
         "",
         f"![reliability](eval/figures/veri_reliability{sfx}.png)",
         f"![sweep](eval/figures/veri_sweep{sfx}.png)",
