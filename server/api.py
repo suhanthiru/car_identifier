@@ -1887,16 +1887,28 @@ def create_app(
     def target_model3d(target_id: str):
         """3D-model status for the dossier. exists=false when 3D is disabled
         or nothing has been fused yet — the UI hides the section then."""
-        from car3d.geometry import signature_from_cloud
-        from car3d.profile_model import Target3DModel
-
         # An unknown target has no model state to report. Answering 200
         # {"exists": false} for an id that does not exist is the same answer as
         # "flagged, nothing fused yet", so a typo or a stale dossier link looked
         # like a live target with no reconstruction. /api/targets/{id} already
         # 404s; this now agrees with it.
+        #
+        # STAYS ABOVE THE IMPORT GUARD BELOW. Putting the guard first made a
+        # cargen-less install answer exists=false for every id, including ones
+        # that do not exist — quietly undoing this check.
         if target_id not in state.tracker.targets():
             raise HTTPException(404, "unknown target")
+
+        # car3d imports cargen at module level, and cargen is genuinely absent
+        # on a minimal install (requirements-minimal.txt drops the 3D bridge on
+        # purpose). Unguarded, this 500'd on exactly the configuration the
+        # README tells people is supported. "No cargen" is the same answer as
+        # "nothing fused yet" as far as the dossier is concerned.
+        try:
+            from car3d.geometry import signature_from_cloud
+            from car3d.profile_model import Target3DModel
+        except Exception as exc:                              # noqa: BLE001
+            return {"exists": False, "reason": f"3D bridge unavailable: {exc}"}
 
         # Give a queued fusion a moment to settle, so the dossier does not
         # report "no model" purely because the worker is a beat behind — but

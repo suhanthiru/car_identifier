@@ -1,0 +1,63 @@
+# The smallest set that still runs the real console. Installed by
+# `python setup_env.py --minimal` (or `python start.py --minimal`), which also
+# forces the CPU torch wheel and skips the cargen 3D bridge.
+#
+# WHY THIS EXISTS. The full install lands at about 6 GB, almost all of it the
+# CUDA torch wheel and its nvidia-* runtime packages. Someone who just wants to
+# see the system work on a laptop should not have to download a CUDA stack for
+# a GPU they do not have.
+#
+# MEASURED, both on clean venvs on this machine: this set produces a 1.1 GB
+# environment against 6.0 GB for the full one. Installed size on disk, not
+# download size.
+#
+# WHAT YOU LOSE, and why none of it changes what the console concludes:
+#
+#   ultralytics + lap    YOLO detection. The real-footage path takes its boxes
+#                        from CityFlow's ground truth, and the synthetic path
+#                        defaults to use_yolo=False, so this never runs in
+#                        either demo. Drags in pandas, scipy, seaborn and
+#                        matplotlib behind it.
+#   fast-plate-ocr       Plate OCR, plus ~50 MB of onnxruntime. Guarded at
+#                        perception/real_observe.py, degrades to "no read" --
+#                        which is what CityFlow produces anyway, since its
+#                        footage has no legible plates at that resolution.
+#   scikit-learn         FITTING the isotonic calibration curve. The runtime
+#                        loads a precomputed JSON grid and is sklearn-free by
+#                        design, so the cascade is calibrated exactly the same.
+#                        (scipy stays: dropping it looks tempting, but
+#                        torchreid imports scipy.io at module load and the
+#                        console dies on the first sighting without it.)
+#   matplotlib           Figures for `python -m eval.run`. No console feature.
+#   lightglue            Multi-view 3D feature matching. Irrelevant without
+#                        cargen, and car3d falls back to ORB regardless.
+#   pytest               The test suite. Add it back if you want to run it.
+#   CUDA torch           The CPU wheel runs everything, slower. On a machine
+#                        with no NVIDIA GPU it is the correct build anyway.
+#   cargen / SF3D        The 3D reconstruction panel, which is already
+#                        optional and already reports itself as off.
+#
+# Everything below is genuinely required: drop any one of them and the console
+# does not start, or dies at the first sighting.
+
+# Core server + storage
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+sqlmodel==0.0.22
+websockets==14.1
+httpx==0.28.1
+
+# Numerics. scipy is not optional despite nothing in this repo importing it:
+# torchreid pulls scipy.io in at import time.
+numpy==1.26.4
+scipy==1.17.1
+
+# Frame decode, crop resize, PNG encode. Used on every sighting in both worlds.
+opencv-python==4.10.0.84
+
+# The ReID backbone. torchreid itself is tiny; torch is the weight here, and
+# setup_env.py installs the CPU wheel before this file so nothing resolves a
+# CUDA build behind our back.
+torchreid==0.2.5
+gdown==6.1.0           # torchreid weight downloads
+tensorboard==2.21.0    # torchreid import-time dependency (unused here)

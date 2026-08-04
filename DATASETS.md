@@ -67,6 +67,8 @@ VehicleID/
 
 ```
 CityFlow/
+├── cam_timestamp/
+│   └── S01.txt                    per-camera clock offsets — see below
 ├── train/
 │   └── S01/
 │       ├── c001/
@@ -76,6 +78,37 @@ CityFlow/
 │       └── c002/ ...
 └── validation/ ...
 ```
+
+### You do not need all 34 GB
+
+The console runs one scenario at a time, and **S01 alone is 0.70 GB** — about
+2% of the package. Everything the console does works on it: five cameras, 95
+vehicles, 409 ground-truth tracks, and the strongest of the three validated
+scenarios in RESULTS.md. Keep only this and delete the rest:
+
+```
+CityFlow/
+├── cam_timestamp/S01.txt                        ~100 bytes
+└── train/S01/c00{1..5}/{vdo.avi, calibration.txt, gt/gt.txt}
+```
+
+Nothing else is read by any code in this repo — not `roi.jpg`, `det/`, `mtsc/`,
+`segm/`, `cam_framenum/`, `cam_loc/`, `eval/`, `list_cam.txt`, and not the
+other scenarios. Dropping the unused per-camera directories saves a further
+74 MB inside S01 itself. With only S01 present, `python -m eval.run` simply
+emits one CityFlow scenario section instead of three; nothing errors.
+
+**Two traps, both silent:**
+
+- **The `train/` level is mandatory.** Scenario discovery globs
+  `*/S*/c*/gt/gt.txt`, where the leading `*` is the split. A tree rooted at
+  `CityFlow/S01/c001/...` is not found, and the launcher reports the dataset
+  as absent rather than as misplaced.
+- **`cam_timestamp/S01.txt` is a sibling of `train/`, not inside it**, so a
+  naive "just grab `train/S01/`" misses it — and its absence is not an error.
+  Every camera silently falls back to a 0.0 offset, which desynchronises the
+  cameras and corrupts every cross-camera elapsed time the transit veto scores
+  against. It is under 1 KB. Take the whole `cam_timestamp/` directory.
 
 - **Honesty note on camera GPS**: AIC22's own ReadMe.txt states individual
   per-camera GPS is *not* published — only one approximate center point per

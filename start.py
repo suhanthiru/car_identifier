@@ -392,13 +392,17 @@ def _run_until_quit(server: "uvicorn.Server", app, make_feed) -> None:
         print("  bye")
 
 
-def _ensure_environment(*, force: bool, refuse: bool) -> bool:
+def _ensure_environment(*, force: bool, refuse: bool, minimal: bool = False) -> bool:
     """Install missing dependencies before the demo needs them.
 
     Returns False when the caller should stop. Installing several GB without
     asking would be rude, so an interactive run confirms first; a
     non-interactive one (CI, a pipe) refuses and prints the command instead
     of silently blocking on a prompt nobody can answer.
+
+    The prompt offers a MINIMAL install as well, because "several GB" is the
+    honest size of the full one and it is the wrong answer for someone who
+    only wants to see the console work. See requirements-minimal.txt.
     """
     if refuse or not (force or setup_env.needs_setup()):
         missing = setup_env.missing_core()
@@ -413,21 +417,34 @@ def _ensure_environment(*, force: bool, refuse: bool) -> bool:
     print(BANNER)
     setup_env.print_report()
     print(BANNER)
-    print("\n  Setting this up means a multi-GB download (torch and friends).")
+    print("\n  Two ways to do this:\n"
+          "\n    [f] full     about 6 GB installed. CUDA torch if this machine has an"
+          "\n                 NVIDIA GPU, YOLO, plate OCR, the eval extras and"
+          "\n                 the 3D reconstruction bridge."
+          "\n    [m] minimal  about 1.1 GB. CPU torch, no 3D panel. Runs the"
+          "\n                 same console and reaches the same verdicts —"
+          "\n                 requirements-minimal.txt says exactly what is"
+          "\n                 dropped and why none of it changes them.\n")
 
     if not sys.stdin.isatty():
         print(f"  Not an interactive terminal, so not starting it unasked. Run:\n"
-              f"    python setup_env.py\n")
+              f"    python setup_env.py            # full\n"
+              f"    python setup_env.py --minimal  # the small one\n")
         return False
-    try:
-        if input("  Install now? [Y/n] ").strip().lower() in ("n", "no"):
+    if minimal:
+        choice = "m"
+    else:
+        try:
+            choice = input("  Install now? [f/m/n] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print("\n  Cancelled.")
+            return False
+        if choice in ("n", "no"):
             print("  Skipped. `python setup_env.py` when you're ready.")
             return False
-    except (EOFError, KeyboardInterrupt):
-        print("\n  Cancelled.")
-        return False
 
-    if not setup_env.bootstrap():
+    want_minimal = choice in ("m", "min", "minimal")
+    if not setup_env.bootstrap(minimal=want_minimal):
         print("\n  Setup did not complete; see the pip output above.")
         return False
 
@@ -435,7 +452,9 @@ def _ensure_environment(*, force: bool, refuse: bool) -> bool:
     # already resolved (and in torch's case cached) the old import state. Hand
     # off to a new interpreter rather than importing into a stale one.
     print("\n  Setup complete — restarting.\n")
-    argv = [a for a in sys.argv[1:] if a not in ("--setup",)]
+    # --minimal forces the setup step, so leaving it on would send the restarted
+    # process straight back into the installer it just finished.
+    argv = [a for a in sys.argv[1:] if a not in ("--setup", "--minimal")]
     raise SystemExit(subprocess.run([sys.executable, str(Path(__file__).resolve()),
                                      *argv]).returncode)
 
@@ -468,6 +487,9 @@ def main() -> None:
                         help="run the install step even if nothing looks missing")
     parser.add_argument("--no-setup", action="store_true",
                         help="never install; fail instead if something is missing")
+    parser.add_argument("--minimal", action="store_true",
+                        help="install the small dependency set without asking "
+                             "(~1.1 GB; see requirements-minimal.txt)")
     args = parser.parse_args()
 
     if args.check:
@@ -481,7 +503,8 @@ def main() -> None:
         print(f"  CityFlow    : {'yes - ' if cityflow[0] else 'no  - '}{cityflow[1]}")
         print(BANNER)
         return
-    if not _ensure_environment(force=args.setup, refuse=args.no_setup):
+    if not _ensure_environment(force=args.setup or args.minimal,
+                               refuse=args.no_setup, minimal=args.minimal):
         return
 
     cityflow = _detect_cityflow()

@@ -37,10 +37,25 @@ runs standalone:
 ```
 python setup_env.py --check          # report what's installed, change nothing
 python setup_env.py                  # install it
+python setup_env.py --minimal        # the small install (~1.1 GB, see below)
 python setup_env.py --dry-run        # print the pip commands it would run
 python start.py --check              # same report, from the launcher
+python start.py --minimal            # small install, no prompt
 python start.py --no-setup           # never install; fail if something's missing
 ```
+
+**The small install.** The full one is about 6 GB installed, almost all of it the CUDA
+torch wheel and its nvidia runtime packages. If you want to see the console
+work rather than develop on it, `--minimal` gets there in about 1.1 GB: CPU
+torch, no 3D reconstruction, no YOLO, no plate OCR, no eval extras. It runs the
+same console on the same footage and reaches the same verdicts —
+[requirements-minimal.txt](requirements-minimal.txt) lists exactly what is
+dropped and why none of it changes what the cascade concludes. The first-run
+prompt offers it as `[m]`.
+
+Pair it with a single scenario: [DATASETS.md](DATASETS.md) shows how to keep
+only S01, which is **0.70 GB instead of ~34 GB** and is the scenario everything
+in the console is tuned and validated against.
 
 **On torch and CUDA.** `pip install -r requirements.txt` on its own gets
 whatever build ultralytics resolves, which is CPU-only on Windows and Linux.

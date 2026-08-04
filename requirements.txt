@@ -7,6 +7,11 @@ websockets==14.1
 # Numerics / calibration
 numpy==1.26.4
 scikit-learn==1.5.2
+# Explicit even though scikit-learn would drag it in anyway: torchreid imports
+# scipy.io at module load, so it is a hard runtime dependency of the console,
+# not an evaluation-only one. Leaving it implicit is what broke
+# requirements-minimal.txt, which drops scikit-learn.
+scipy==1.17.1
 
 # Perception (off-the-shelf glue — heavy; installed lazily, see README)
 # NOTE ON torch: plain `pip install -r requirements.txt` gets whatever build

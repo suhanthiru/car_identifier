@@ -5,6 +5,7 @@ runnable on its own:
 
     python setup_env.py            # install whatever is missing
     python setup_env.py --check    # report only, change nothing
+    python setup_env.py --minimal  # 1.1 GB instead of 6 GB
 
 Three things need setting up and only one of them is a plain `pip install`:
 
@@ -162,13 +163,36 @@ def print_report(st: dict[str, object] | None = None) -> None:
 
 
 def bootstrap(*, want_cuda: bool = True, want_cargen: bool = True,
-              dry_run: bool = False) -> bool:
-    """Install what's missing. Returns False if a required step failed."""
+              minimal: bool = False, dry_run: bool = False) -> bool:
+    """Install what's missing. Returns False if a required step failed.
+
+    `minimal` installs requirements-minimal.txt instead, forces the CPU torch
+    wheel and skips cargen. Measured on clean venvs: 1.1 GB installed against
+    6.0 GB for the full set, for someone who wants to see the console work
+    rather than develop on it. That file documents exactly what is dropped and
+    why none of it changes what the cascade concludes.
+    """
     st = report()
     ok = True
+    if minimal:
+        # Not a warning — this is the supported path, and saying so is what
+        # stops it reading as a degraded accident later.
+        want_cuda, want_cargen = False, False
+        print("\n  minimal install: CPU torch, no 3D bridge, no YOLO, no plate"
+              "\n  OCR, no eval extras. See requirements-minimal.txt for what"
+              "\n  that costs (nothing the console concludes).")
 
-    # 1. torch first, so requirements.txt doesn't resolve a CPU build for us.
+    # 1. torch first, so the requirements file doesn't resolve a build for us.
     index = os.environ.get("EYES_TORCH_INDEX", DEFAULT_TORCH_INDEX)
+    if minimal and not st["torch_installed"]:
+        # Explicit CPU index rather than letting it come in transitively:
+        # torchreid does not pin torch, so an unpinned resolve on a machine
+        # with a GPU can still pull the multi-GB CUDA wheel, which is the one
+        # thing --minimal exists to avoid.
+        if not _pip("torch", "torchvision", "--index-url",
+                    "https://download.pytorch.org/whl/cpu", dry_run=dry_run):
+            print("\n  ! CPU torch wheels failed to install — see pip's output.")
+            ok = False
     if want_cuda and st["gpu"] and not st["torch_cuda"]:
         if st["torch_installed"]:
             print("\n  torch is a CPU-only build but this machine has a GPU;"
@@ -187,8 +211,9 @@ def bootstrap(*, want_cuda: bool = True, want_cargen: bool = True,
         print("\n  no NVIDIA GPU — skipping the CUDA wheel, CPU torch is correct here.")
 
     # 2. everything else.
-    if not _pip("-r", str(ROOT / "requirements.txt"), dry_run=dry_run):
-        print("\n  ! requirements.txt failed to install — see the pip output above.")
+    reqs = "requirements-minimal.txt" if minimal else "requirements.txt"
+    if not _pip("-r", str(ROOT / reqs), dry_run=dry_run):
+        print(f"\n  ! {reqs} failed to install — see the pip output above.")
         ok = False
 
     # 3. cargen: optional by design, never fails the run.
@@ -240,6 +265,9 @@ def main() -> int:
     ap.add_argument("--dry-run", action="store_true", help="print the pip commands only")
     ap.add_argument("--no-cuda", action="store_true", help="force the CPU torch build")
     ap.add_argument("--no-cargen", action="store_true", help="skip the 3D bridge")
+    ap.add_argument("--minimal", action="store_true",
+                    help="smallest install that still runs the console "
+                         "(~1.1 GB: CPU torch, no 3D, no YOLO, no eval extras)")
     args = ap.parse_args()
 
     print("=" * 66)
@@ -251,7 +279,7 @@ def main() -> int:
         return 0
 
     ok = bootstrap(want_cuda=not args.no_cuda, want_cargen=not args.no_cargen,
-                   dry_run=args.dry_run)
+                   minimal=args.minimal, dry_run=args.dry_run)
     if not args.dry_run:
         print("\n" + "=" * 66)
         print("  after setup")

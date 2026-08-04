@@ -467,9 +467,18 @@ function renderScaleStrip(s) {
     cell("cross-camera hops", c.cross_camera_hops,
          "ground truth: the same vehicle appearing at a new camera. A fact "
          + "about the footage, not a match this system proposed.") +
-    cell("reviews", c.reviews_raised, "sent to a human rather than asserted") +
+    // These two OVERLAP, and saying so is the whole point of showing both.
+    // Refusing to individuate always raises a review, so every refusal is
+    // already counted in `reviews` -- the second number says how many of the
+    // first were that particular kind. Two counters with near-identical
+    // phrasing read as disjoint outcomes and made the totals look double.
+    cell("reviews", c.reviews_raised,
+         "decisions handed to a human instead of asserted. Includes the "
+         + "refusals counted next to it, which are one kind of review.") +
     cell("refusals", c.refusals,
-         "narrowed to a set and declined to name an individual");
+         "of those reviews, the ones where the evidence matched but was too "
+         + "generic to name one car: the system narrowed to a candidate set "
+         + "and declined to pick from it.");
   // The "zero reviews is expected here — why?" disclosure that used to sit
   // here has been removed because it had gone stale and was asserting
   // something no longer true: it said the console proposes no cross-camera
@@ -935,17 +944,30 @@ function reconcileFlaggedTile(tile, v) {
  */
 function watchBadge(v) {
   const a = vehicleActivity[String(v.vehicle_id)] || {};
-  const decided = (a.rejected || 0) + (a.reviewed || 0) + (a.matched || 0)
-    + (a.refusals || 0);
+  // REFUSALS ARE A SUBSET OF REVIEWS, not a fourth outcome. Refusing to
+  // individuate always raises a review, so the server keeps `refusals` as a
+  // LABEL on part of `reviewed` and deliberately excludes it from the buckets
+  // that sum to `considered`. Adding it here double-counted: a car with 3
+  // reviews, 2 of them refusals, showed "3 to review · 2 refused" and read as
+  // five decisions.
+  const decided = (a.rejected || 0) + (a.reviewed || 0) + (a.matched || 0);
   if (decided) {
     const parts = [];
     if (a.matched) parts.push(`${a.matched} matched`);
-    if (a.reviewed) parts.push(`${a.reviewed} to review`);
+    if (a.reviewed) {
+      parts.push(a.refusals
+        ? `${a.reviewed} to review (${a.refusals} refused)`
+        : `${a.reviewed} to review`);
+    }
     if (a.rejected) parts.push(`${a.rejected} rejected`);
-    if (a.refusals) parts.push(`${a.refusals} refused`);
     return `<span class="vt-watch vt-watch-live" title="${escapeHtml(
       `this run: ${parts.join(', ')} across ${a.considered || 0} `
-      + `comparison(s) against your flagged cars`)}">`
+      + `comparison(s) against your flagged cars.`
+      + (a.refusals
+        ? ` "Refused" is a kind of review, not a separate outcome: the`
+          + ` evidence matched but was too generic to name one car, so the`
+          + ` system offered a candidate set instead.`
+        : ""))}">`
       + `${escapeHtml(parts.join(" · "))}</span>`;
   }
   if (a.sightings) {
