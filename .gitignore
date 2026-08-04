@@ -23,7 +23,14 @@ weights/
 *.engine
 
 # Data / runtime artifacts
-data/
+# `data/*` rather than `data/` so the negation below can reach inside: git does
+# not descend into an excluded DIRECTORY, so `!data/showcase/` under a bare
+# `data/` would never match.
+data/*
+# Committed on purpose (40 KB of text): the per-scenario showcase sets are a
+# FROZEN ranking, so the console shows the same cars with the same stated
+# reasons on a fresh clone. Regenerate with scripts/rank_showcase.py.
+!data/showcase/
 *.sqlite
 *.sqlite3
 *.db

@@ -605,6 +605,8 @@ async function initPipelineStrip() {
 function showRealDataLayout() {
   document.getElementById("flag-section")?.classList.add("hidden");
   document.getElementById("cityflow-vehicles-section")?.classList.remove("hidden");
+  // Only now is the bottom half worth half the panel — see .split-even.
+  document.getElementById("side-targets")?.classList.add("split-even");
 }
 
 /** A sentence in the browse grid while there is nothing to show yet. */
@@ -697,6 +699,18 @@ async function initCityflowVehicleBrowser() {
   renderedScenario = scenario;
   setBrowseStatus("");
 
+  // The showcase set: a committed artifact, not a live computation, so one
+  // fetch for the session. A scenario with no artifact 404s and the mode
+  // simply falls back — it is an enhancement, not a dependency.
+  const showcase = await api(`/api/cityflow/${scenario}/showcase`)
+    .catch(() => null);
+  showcaseById = {};
+  showcaseOrder = [];
+  (showcase?.vehicles || []).forEach((v) => {
+    showcaseById[String(v.vehicle_id)] = v;
+    showcaseOrder.push(String(v.vehicle_id));
+  });
+
   // Filter on TIME, not on camera count.
   //
   // The obvious filter — "seen at 2+ cameras" — is a no-op on this dataset:
@@ -739,7 +753,19 @@ async function initCityflowVehicleBrowser() {
     const act = (v) => vehicleActivity[String(v.vehicle_id)] || {};
     let shown = all;
     let emptyNote = "";
-    if (how === "upcoming") shown = all.filter(upcoming);
+    if (how === "showcase") {
+      // A fixed set, in the artifact's own order, so the pair sits together
+      // at the top. Not filtered by the clock: these are the cars to flag,
+      // and one of the things worth seeing is what happens when you flag a
+      // car whose passage has already gone by.
+      shown = showcaseOrder
+        .map((id) => all.find((v) => String(v.vehicle_id) === id))
+        .filter(Boolean);
+      if (!shown.length) {
+        emptyNote = "No showcase set for this scenario yet. Generate one with "
+          + "`python scripts/rank_showcase.py`, or pick another filter above.";
+      }
+    } else if (how === "upcoming") shown = all.filter(upcoming);
     else if (how === "seen") {
       // Selected on what the run has ACTUALLY ingested, not on a property of
       // the footage: a car appears here the moment a camera reports it and
@@ -802,6 +828,14 @@ async function initCityflowVehicleBrowser() {
 
 // vehicle_id -> tile element, so a refresh can reconcile instead of rebuild.
 const vehicleTiles = new Map();
+
+/* The showcase set for the active scenario, keyed by vehicle id, plus the
+ * artifact's own ordering. From scripts/rank_showcase.py via
+ * /api/cityflow/{scenario}/showcase — ranked on ground truth alone, never on
+ * what the cascade concluded, and frozen to a file so the same cars appear
+ * with the same stated reasons every launch. */
+let showcaseById = {};
+let showcaseOrder = [];
 
 /* What THIS RUN has observed and concluded, per ground-truth vehicle id.
  *
@@ -998,8 +1032,19 @@ function renderVehicleTiles(vehicles) {
     const a = vehicleActivity[String(v.vehicle_id)] || {};
     const decided = (a.rejected || 0) + (a.reviewed || 0) + (a.matched || 0)
       + (a.refusals || 0);
-    tile.innerHTML = `${img}<div class="vt-label">#${escapeHtml(String(v.vehicle_id))} · t+${Math.round(v.first_time_s)}s ${badge} ${watchBadge(v)}</div>`;
-    tile.title = decided
+    // A showcase car states its reason on the tile, because the reason IS the
+    // feature: "here is the one worth watching, and here is what it should
+    // make the system do" is checkable, where an unexplained shortlist is
+    // just a claim.
+    const show = showcaseById[String(v.vehicle_id)];
+    const note = show
+      ? `<div class="vt-why">${escapeHtml(show.headline)}</div>`
+      : "";
+    tile.innerHTML = `${img}<div class="vt-label">#${escapeHtml(String(v.vehicle_id))} · t+${Math.round(v.first_time_s)}s ${badge} ${watchBadge(v)}</div>${note}`;
+    if (show) tile.classList.add("vt-showcase");
+    tile.title = show
+      ? `${show.why}\n\n${show.expect}`
+      : decided
       ? `Flag vehicle ${v.vehicle_id} — this run has already made `
         + `${decided} decision(s) about its sightings`
       : a.sightings
@@ -1405,6 +1450,8 @@ function renderTargetList(targets) {
   const el = document.getElementById("targets");
   const entries = Object.entries(targets);
   el.innerHTML = entries.length ? "" : `<div class="alert-row">no targets flagged yet</div>`;
+  const count = document.getElementById("selected-count");
+  if (count) count.textContent = entries.length ? String(entries.length) : "";
   entries.forEach(([id, t]) => {
     const card = document.createElement("div");
     card.className = `target-card ${t.state}`;

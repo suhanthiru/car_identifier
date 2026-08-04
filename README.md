@@ -137,6 +137,27 @@ the harness never substitutes synthetic numbers for missing real ones.
 
 ### Driving it yourself
 
+The console runs a **guided tour** the first time you open it: it darkens the
+screen, points at one panel at a time, and explains what the numbers mean and
+what the system will and will not conclude. Re-runnable any time from
+**? TOUR** in the top bar.
+
+The browse list opens on **the interesting ones** — a fixed shortlist per
+scenario, each car with a stated reason for being there and a prediction you
+can check. Between them they exercise everything this dataset can reach: a
+clean unobserved hop, one car whose evidence points both ways, one that is
+never out of sight and so raises nothing at all, and a look-alike pair that has
+to be flagged together.
+
+Those picks are ranked from the dataset's own ground truth and frozen to
+`data/showcase/*.json`, so the same cars appear with the same reasons every
+launch. Regenerate with `python scripts/rank_showcase.py`; `--check` fails if a
+committed set no longer matches the scorer. Deliberately **not** ranked on what
+the cascade concluded — showing the cars we already knew would work would be
+selection on the outcome, and the demo would be answering a question it had
+rigged. Checked afterwards against `data/recognizability_s01.json`, each S01
+pick does behave as its archetype predicts.
+
 [STRESS_TEST.md](STRESS_TEST.md) is a ~10-minute walkthrough of the operator
 console — flag a car, watch the cascade reason about it, try to make it assert
 something it shouldn't. It reads best with CityFlow downloaded, and says what
@@ -154,6 +175,8 @@ python start.py --no-3d              # skip the 3D panel
 python start.py --3d-identification  # let 3D geometry vote on identity (off by default)
 python -m eval.run --embedder fastreid          # VeRi block on the strong backbone
 python scripts/ablate_3d_cityflow.py --vehicles 95   # the measured 3D ablation
+python scripts/rank_showcase.py                 # rebuild the per-scenario showcase sets
+python scripts/rank_showcase.py --check         # fail if a committed set is stale
 ```
 
 ### Switching between synthetic and real data

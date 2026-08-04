@@ -20,6 +20,8 @@ import base64
 import binascii
 import dataclasses
 import itertools
+import json
+import re
 import shutil
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -49,6 +51,7 @@ from sim.road_graph import RoadGraph, default_world
 from tracking.tracker import FleetTracker
 
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
+SHOWCASE_DIR = Path(__file__).resolve().parent.parent / "data" / "showcase"
 
 
 def _clip_urls(row) -> list[str]:
@@ -1576,6 +1579,41 @@ def create_app(
         if state.cityflow_root is None or not CityFlow.exists(state.cityflow_root):
             return []
         return CityFlow(state.cityflow_root).scenario_names()
+
+    @app.get("/api/cityflow/{scenario}/showcase")
+    def cityflow_showcase(scenario: str):
+        """The handful of vehicles in this scenario worth watching, and why.
+
+        A committed artifact from scripts/rank_showcase.py, not a live
+        computation: the ranking is derived from ground truth, which is a
+        fixed property of the footage, so freezing it means the demo shows the
+        same cars with the same stated reasons every launch. Deliberately kept
+        out of build_vehicle_index -- that cache is keyed on a version string
+        and costs a ~16s video re-decode per scenario to rebuild, and none of
+        this needs a single frame decoded.
+
+        Not gated on the active scenario (unlike /vehicles below): this is
+        static text and reading another scenario's reasons is harmless.
+        """
+        # `scenario` is path-segment input. Reject anything that isn't a bare
+        # name before it reaches the filesystem, then containment-check the
+        # resolved path anyway -- belt and braces, because an arbitrary read
+        # rooted in the repo is exactly the bug class this file has had before.
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,32}", scenario):
+            raise HTTPException(404, f"unknown scenario {scenario!r}")
+        root = SHOWCASE_DIR.resolve()
+        try:
+            path = (root / f"{scenario.upper()}.json").resolve()
+        except (OSError, ValueError):
+            raise HTTPException(404, f"unknown scenario {scenario!r}")
+        if root not in path.parents or not path.is_file():
+            raise HTTPException(
+                404, f"no showcase set for {scenario!r}. Generate one with "
+                     f"`python scripts/rank_showcase.py --scenario {scenario}`.")
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise HTTPException(404, f"showcase set for {scenario!r} unreadable: {exc}")
 
     @app.get("/api/cityflow/{scenario}/vehicles")
     def cityflow_vehicles(scenario: str, min_cameras: int = 1):

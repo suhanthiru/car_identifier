@@ -115,6 +115,36 @@ body {
   font-size: 11px; font-weight: 600; letter-spacing: .06em; color: var(--dim);
 }
 
+/* The side panel is two independent scrollers, not one flow. Selected cars on
+   top, the pool you pick from underneath. Before this, both lived in a single
+   .panel-scroll, so flagging a car pushed your own targets down below 95
+   browse tiles — the one thing you came back to the panel to look at.
+
+   Default rows are `1fr auto`: in the synthetic world the bottom half is just
+   the short flag form, and giving it half the panel would be dead space. Real
+   data adds .split-even (showRealDataLayout) to make it a true half-and-half.
+   minmax(0,...) on both rows is load-bearing — a grid row's default min-content
+   floor refuses to shrink below its content, and the scrollers never engage. */
+.side-split {
+  flex: 1; min-height: 0; display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+}
+.side-split.split-even { grid-template-rows: minmax(0, 1fr) minmax(0, 1fr); }
+.split-half {
+  min-height: 0; overflow-y: auto; padding: 12px;
+  display: flex; flex-direction: column; gap: 10px;
+  /* Keeps scrollIntoView clear of the sticky subhead. Without it a scrolled-to
+     tile lands exactly underneath the header, which is opaque and sits above
+     it — so the tile is on screen, looks clickable, and isn't. */
+  scroll-padding-top: 46px;
+}
+#split-browse { border-top: 1px solid var(--line); }
+/* Keeps "SELECTED" / "BROWSE" visible while its own half scrolls, so you can
+   always tell which list you are looking at. */
+.sticky-subhead {
+  position: sticky; top: -12px; z-index: 2; margin: -12px -12px 8px;
+  padding: 12px 12px 6px; background: var(--panel);
+}
 .panel-subhead {
   font-size: 9.5px; color: var(--dim); letter-spacing: .05em;
   text-transform: uppercase; margin-bottom: 8px; display: flex;
@@ -128,6 +158,22 @@ body {
   overflow: hidden; cursor: pointer; text-align: center;
 }
 .vehicle-tile:hover { border-color: var(--accent); }
+/* A showcase car takes a full row and reads left-to-right, because its reason
+   is the point of it being there and a reason does not fit in a third of a
+   320px panel. Thumbnail spans both text rows. */
+.vehicle-tile.vt-showcase {
+  grid-column: 1 / -1; text-align: left;
+  display: grid; grid-template-columns: 62px 1fr; gap: 1px 8px;
+  align-items: start; padding: 4px; border-color: #2f4a6b;
+}
+.vehicle-tile.vt-showcase img,
+.vehicle-tile.vt-showcase .no-crop {
+  grid-row: 1 / 3; width: 62px; height: 42px; border-radius: 3px;
+}
+.vehicle-tile.vt-showcase .vt-label { padding: 0; }
+.vt-why {
+  font-size: 10px; line-height: 1.35; color: var(--text); padding-right: 2px;
+}
 .vehicle-tile img {
   width: 100%; height: 44px; object-fit: cover; display: block;
   image-rendering: pixelated; background: #0c1116;

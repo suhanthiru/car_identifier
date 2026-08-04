@@ -1,0 +1,209 @@
+{
+  "schema": "showcase-v1",
+  "scenario": "S05",
+  "generated_from": "ground truth (gt.txt + observed-hop road graph)",
+  "n_vehicles_considered": 337,
+  "vehicles": [
+    {
+      "vehicle_id": 507,
+      "archetype": "lookalike_pair",
+      "headline": "Confusable with vehicle 546",
+      "why": "Side by side with vehicle 546 at the same camera, and both go on to the same next one. Every space-time signal fires identically for the two of them.",
+      "expect": "Flag BOTH. Expect the ambiguity guard to fire: when two targets score within 0.10 of each other the system refuses to pick and sends it to review instead.",
+      "partner_vehicle_id": 546,
+      "features": {
+        "n_cameras": 4,
+        "n_passages": 4,
+        "cameras": [
+          "c029",
+          "c033",
+          "c034",
+          "c035"
+        ],
+        "visible_s": 89.9,
+        "span_s": 94.4,
+        "first_time_s": 90.7,
+        "last_time_s": 185.1,
+        "first_camera": "c029",
+        "n_hops": 3,
+        "positive_gap_hops": 1,
+        "max_gap_s": 14.0,
+        "max_overlap_s": -8.6,
+        "in_window_hops": 0,
+        "veto_hops": 0
+      }
+    },
+    {
+      "vehicle_id": 546,
+      "archetype": "lookalike_pair",
+      "headline": "Confusable with vehicle 507",
+      "why": "Side by side with vehicle 507 at the same camera, and both go on to the same next one. Every space-time signal fires identically for the two of them.",
+      "expect": "Flag BOTH. Expect the ambiguity guard to fire: when two targets score within 0.10 of each other the system refuses to pick and sends it to review instead.",
+      "partner_vehicle_id": 507,
+      "features": {
+        "n_cameras": 4,
+        "n_passages": 4,
+        "cameras": [
+          "c029",
+          "c033",
+          "c034",
+          "c035"
+        ],
+        "visible_s": 105.8,
+        "span_s": 104.0,
+        "first_time_s": 98.7,
+        "last_time_s": 202.7,
+        "first_camera": "c029",
+        "n_hops": 3,
+        "positive_gap_hops": 2,
+        "max_gap_s": 12.5,
+        "max_overlap_s": -16.2,
+        "in_window_hops": 0,
+        "veto_hops": 0
+      }
+    },
+    {
+      "vehicle_id": 465,
+      "archetype": "clean_hop",
+      "headline": "Crosses cameras with a real gap",
+      "why": "Left c035 and reappeared 120.0s later at another camera, with nothing observing it in between. That gap is the whole problem the system exists to solve.",
+      "expect": "Expect a candidate verdict on the second camera: the transit window supports it, but colour alone cannot name one car.",
+      "features": {
+        "n_cameras": 7,
+        "n_passages": 7,
+        "cameras": [
+          "c026",
+          "c027",
+          "c028",
+          "c029",
+          "c033",
+          "c034",
+          "c035"
+        ],
+        "visible_s": 101.4,
+        "span_s": 238.9,
+        "first_time_s": 178.8,
+        "last_time_s": 417.7,
+        "first_camera": "c035",
+        "n_hops": 6,
+        "positive_gap_hops": 4,
+        "max_gap_s": 120.0,
+        "max_overlap_s": -4.3,
+        "in_window_hops": 2,
+        "veto_hops": 0
+      }
+    },
+    {
+      "vehicle_id": 510,
+      "archetype": "veto_and_support",
+      "headline": "One hop supported, another refused",
+      "why": "1 of its hops land inside the window real vehicles were observed to take, and 1 arrived faster than is physically possible. One car, evidence pointing both ways.",
+      "expect": "Expect the impossible hop to be rejected outright and the plausible ones to reach candidate. Watch the cascade panel disagree with itself across sightings -- that is the point.",
+      "features": {
+        "n_cameras": 4,
+        "n_passages": 4,
+        "cameras": [
+          "c029",
+          "c033",
+          "c034",
+          "c035"
+        ],
+        "visible_s": 40.9,
+        "span_s": 44.6,
+        "first_time_s": 0.1,
+        "last_time_s": 44.7,
+        "first_camera": "c033",
+        "n_hops": 3,
+        "positive_gap_hops": 2,
+        "max_gap_s": 10.9,
+        "max_overlap_s": -11.6,
+        "in_window_hops": 1,
+        "veto_hops": 1
+      }
+    },
+    {
+      "vehicle_id": 548,
+      "archetype": "never_unobserved",
+      "headline": "Never once out of sight",
+      "why": "Its camera views overlap by up to 38.3s -- it is in two places' footage at once, so there is no unobserved gap to reason across.",
+      "expect": "Expect undecided, repeatedly. With no gap to cross, the transit signal never fires and colour alone scores below the threshold. A car the system honestly has nothing to say about.",
+      "features": {
+        "n_cameras": 3,
+        "n_passages": 3,
+        "cameras": [
+          "c029",
+          "c033",
+          "c034"
+        ],
+        "visible_s": 129.2,
+        "span_s": 105.5,
+        "first_time_s": 118.7,
+        "last_time_s": 224.2,
+        "first_camera": "c029",
+        "n_hops": 2,
+        "positive_gap_hops": 1,
+        "max_gap_s": 14.6,
+        "max_overlap_s": -38.3,
+        "in_window_hops": 0,
+        "veto_hops": 0
+      }
+    },
+    {
+      "vehicle_id": 333,
+      "archetype": "longest_watch",
+      "headline": "The longest story in the scenario",
+      "why": "Visible for 405.8s across 7 cameras, the most footage any vehicle here gets.",
+      "expect": "Expect the appearance gallery to grow across many sightings, and the score to stay put anyway -- more looks at the same silver sedan is not more distinctive.",
+      "features": {
+        "n_cameras": 7,
+        "n_passages": 7,
+        "cameras": [
+          "c016",
+          "c017",
+          "c018",
+          "c019",
+          "c020",
+          "c021",
+          "c022"
+        ],
+        "visible_s": 405.8,
+        "span_s": 427.6,
+        "first_time_s": 0.1,
+        "last_time_s": 427.7,
+        "first_camera": "c016",
+        "n_hops": 6,
+        "positive_gap_hops": 4,
+        "max_gap_s": 23.1,
+        "max_overlap_s": -7.9,
+        "in_window_hops": 1,
+        "veto_hops": 0
+      }
+    },
+    {
+      "vehicle_id": 653,
+      "archetype": "thinnest_evidence",
+      "headline": "The least the system gets to work with",
+      "why": "Visible for only 4.2s across 2 cameras. Barely enough pixels to build a profile from.",
+      "expect": "Expect a candidate anyway. A few seconds of footage and one plausible hop is enough for the system to narrow -- which is exactly why narrowing is not the same as identifying.",
+      "features": {
+        "n_cameras": 2,
+        "n_passages": 2,
+        "cameras": [
+          "c033",
+          "c034"
+        ],
+        "visible_s": 4.2,
+        "span_s": 2.5,
+        "first_time_s": 0.1,
+        "last_time_s": 2.6,
+        "first_camera": "c033",
+        "n_hops": 1,
+        "positive_gap_hops": 0,
+        "max_gap_s": -1.7,
+        "max_overlap_s": -1.7,
+        "in_window_hops": 1,
+        "veto_hops": 0
+      }
+    }
+  ]
+}

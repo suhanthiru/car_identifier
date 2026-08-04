@@ -6,6 +6,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="tutorial.css">
 </head>
 <body>
 <!-- Text is authoritative only after initMap() reconciles it with
@@ -35,6 +36,8 @@
     <div class="tb-stat"><span class="tb-dot tb-dot-green"></span><span id="tb-cameras">— cameras</span></div>
     <div class="tb-sep"></div>
     <div class="tb-stat"><span class="tb-dot tb-dot-blue"></span>CHAIN <span id="tb-chain" class="mono accent">—</span></div>
+    <div class="tb-sep"></div>
+    <button id="tour-start" class="tb-btn" title="Walk through the console: what each panel is, what the numbers mean, and what the system will and will not conclude.">? TOUR</button>
   </div>
 </div>
 
@@ -134,15 +137,26 @@
       <span id="side-title">TARGETS</span>
       <button id="side-back" class="link-btn hidden">&larr; back</button>
     </div>
-    <div id="side-targets" class="panel-scroll">
+    <div id="side-targets" class="side-split">
+      <!-- Top half: what you have chosen. Bottom half: what you can choose.
+           Two independent scrollers, because one shared scroll flow pushed an
+           operator's own targets off the bottom under 95 browse tiles. -->
+      <div class="split-half" id="split-selected">
+        <div class="panel-subhead sticky-subhead">SELECTED
+          <span id="selected-count" class="vt-count"></span>
+        </div>
+        <div id="targets"></div>
+      </div>
+      <div class="split-half" id="split-browse">
       <section id="cityflow-vehicles-section" class="hidden">
-        <div class="panel-subhead">BROWSE REAL VEHICLES
+        <div class="panel-subhead sticky-subhead">BROWSE REAL VEHICLES
           <select id="cityflow-scenario-select" class="scenario-select"
                   title="Replay a different scenario. Different cameras and footage, so this restarts the run and clears it."></select>
         </div>
-        <label class="vt-filter" title="Straight from the dataset's own ground truth: this vehicle left one camera and arrived at another later, with a gap in between where nothing observed it. That gap is the problem the system exists to solve. Nothing here has been run through the system — the filter describes the footage, not any result.">
+        <label class="vt-filter" title="Which vehicles to list. The first option is a fixed set picked from the dataset's own ground truth — the cars that between them exercise the most of the system, each with a stated reason and a prediction you can check. The rest describe the footage or this run. Nothing here is selected on what the system concluded; that would be rigging the demo.">
           <select id="cf-mode" class="scenario-select">
-            <option value="seen" selected>seen so far this run</option>
+            <option value="showcase" selected>the interesting ones</option>
+            <option value="seen">seen so far this run</option>
             <option value="reasoned">reasoned about this run</option>
             <option value="journeys">crosses cameras with a gap</option>
             <option value="upcoming">still to come</option>
@@ -171,7 +185,7 @@
           <button type="submit">Flag target</button>
         </form>
       </section>
-      <div id="targets"></div>
+      </div>
     </div>
     <div id="side-dossier" class="panel-scroll hidden"></div>
   </div>
@@ -203,5 +217,8 @@
 <script src="roadmap.js"></script>
 <script src="pipeline_diagram.js"></script>
 <script src="app.js"></script>
+<!-- After app.js: the tour reads its globals (latestStats, clockNow, …) and
+     drives the same controls an operator would. -->
+<script src="tutorial.js"></script>
 </body>
 </html>
